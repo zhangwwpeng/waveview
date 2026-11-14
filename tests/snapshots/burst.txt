@@ -1,0 +1,15 @@
+标题：突发传输（省略空闲期）
+时钟：clk 100MHz（周期 10ns）
+t=0ns        初始        rst_n=0 en=0 sda=z addr=x
+t=12ns       @12ns       rst_n 0→1
+t=20ns       clk↑#3      en 0→1, addr x→0x1000, sda z→0
+t=30ns       clk↑#4      addr 0x1000→0x1004, sda 0→1
+t=40ns       clk↑#5      addr 0x1004→0x1008, sda 1→0
+t=50ns       clk↑#6      addr 0x1008→0x100C, sda 0→1
+t=60ns       clk↑#7      en 1→0, addr 0x100C→x, sda 1→z
+t=1070ns     clk↑#108    en 0→1, addr x→0x2000, sda z→1
+t=1090ns     clk↑#110    en 1→0, addr 0x2000→x, sda 1→z
+省略：60ns ~ 1060ns
+标记：20ns "T0"
+标记：1070ns "T1"
+结束：1110ns

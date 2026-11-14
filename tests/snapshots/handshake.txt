@@ -1,0 +1,8 @@
+标题：valid/ready 握手
+时钟：clk 100MHz（周期 10ns）
+t=0ns        初始        valid=0 ready=0 data=x
+t=10ns       clk↑#2      valid 0→1, data x→0xA5
+t=30ns       clk↑#4      ready 0→1
+t=40ns       clk↑#5      valid 1→0, ready 1→0, data 0xA5→x
+箭头：valid@10ns → ready@30ns "2 拍后响应"
+结束：60ns

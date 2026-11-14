@@ -1,0 +1,11 @@
+标题：CDC 两级同步
+时钟：clka 100MHz（周期 10ns）；clkb 143MHz（周期 6.993ns） phase=2ns
+t=0ns        初始        din=0 s1=0 s2=0
+t=10ns       clka↑#2     din 0→1
+t=15.986ns   clkb↑#3     s1 0→x
+t=22.979ns   clkb↑#4     s1 x→1, s2 0→x
+t=29.972ns   clkb↑#5     s2 x→1
+区域：s1 15.986ns ~ 22.979ns "亚稳态"
+箭头：din@10ns → s1@15.986ns "采样"
+测量：10ns ~ 29.972ns（19.972ns） "同步延迟"
+结束：43.958ns

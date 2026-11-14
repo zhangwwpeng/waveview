@@ -1,0 +1,19 @@
+标题：APB 写 / 读传输（50MHz）
+时钟：clk 50MHz（周期 20ns）
+t=0ns        初始        rst_n=0 psel=0 penable=0 pwrite=0 paddr=x pwdata=x prdata=x pready=0 pslverr=0
+t=5ns        @5ns        rst_n 0→1
+t=20ns       clk↑#2      psel 0→1, pwrite 0→1, paddr x→0x00000020, pwdata x→0x12345678
+t=40ns       clk↑#3      penable 0→1
+t=60ns       clk↑#4      pready 0→1
+t=80ns       clk↑#5      psel 1→0, penable 1→0, pwrite 1→0, paddr 0x00000020→x, pwdata 0x12345678→x, pready 1→0
+t=100ns      clk↑#6      psel 0→1, paddr x→0x00000024
+t=120ns      clk↑#7      penable 0→1, pready 0→1, prdata x→0xDEADBEEF
+t=140ns      clk↑#8      psel 1→0, penable 1→0, paddr 0x00000024→x, prdata 0xDEADBEEF→x, pready 1→0
+标记：5ns "复位释放"
+标记：80ns "写完成"
+标记：140ns "读完成"
+区域：penable 40ns ~ 60ns "等待 PREADY"
+箭头：penable@40ns → pready@60ns "从机插等待"
+测量：20ns ~ 80ns（60ns） "写传输"
+测量：100ns ~ 140ns（40ns） "读传输"
+结束：180ns

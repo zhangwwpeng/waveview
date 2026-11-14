@@ -1,0 +1,24 @@
+标题：SPI 模式 0：发送 0xA5 / 接收 0x3C
+t=0ns        初始        cs_n=1 sclk=0 mosi=z miso=z bit=z
+t=20ns       @20ns       cs_n 1→0, mosi z→1, miso z→0, bit z→b7
+t=45ns       +25ns       sclk 0→1
+t=70ns       +25ns       sclk 1→0, bit b7→b6, mosi 1→0
+t=95ns       +25ns       sclk 0→1
+t=120ns      +25ns       sclk 1→0, bit b6→b5, mosi 0→1, miso 0→1
+t=145ns      +25ns       sclk 0→1
+t=170ns      +25ns       sclk 1→0, bit b5→b4, mosi 1→0
+t=195ns      +25ns       sclk 0→1
+t=220ns      +25ns       sclk 1→0, bit b4→b3
+t=245ns      +25ns       sclk 0→1
+t=270ns      +25ns       sclk 1→0, bit b3→b2, mosi 0→1
+t=295ns      +25ns       sclk 0→1
+t=320ns      +25ns       sclk 1→0, bit b2→b1, mosi 1→0, miso 1→0
+t=345ns      +25ns       sclk 0→1
+t=370ns      +25ns       sclk 1→0, bit b1→b0, mosi 0→1
+t=395ns      +25ns       sclk 0→1
+t=420ns      +25ns       sclk 1→0, mosi 1→z, miso 0→z, bit b0→z
+t=445ns      +25ns       cs_n 0→1
+测量：20ns ~ 45ns（25ns） "tCSS"
+箭头：mosi@20ns → sclk@45ns "采样 b7"
+区域：sclk 20ns ~ 420ns "8 个时钟"
+结束：489.5ns
