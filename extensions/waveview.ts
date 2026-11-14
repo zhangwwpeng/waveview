@@ -28,9 +28,10 @@ function detectRepoRoot(): string | undefined {
 	if (!import.meta.dirname) return undefined;
 	try {
 		const pluginDir = realpathSync(import.meta.dirname);
-		const candidate = join(pluginDir, "..", "..");
-		if (existsSync(join(candidate, "src", "waveview", "__init__.py"))) {
-			return candidate;
+		for (const candidate of [pluginDir, join(pluginDir, ".."), join(pluginDir, "..", "..")]) {
+			if (existsSync(join(candidate, "src", "waveview", "__init__.py"))) {
+				return candidate;
+			}
 		}
 	} catch {
 		return undefined;
@@ -80,7 +81,7 @@ export function renderWaveBlock(code: string): string {
 	let out: string;
 	if (!cmd) {
 		out =
-			"```text\nwaveview 渲染失败：未找到 waveview CLI，请先安装到 ~/.local/bin（例如 uv tool install -e <repo> 或 uv tool install git+...）\n```\n\n```python\n" +
+			"```text\nwaveview 渲染失败：未找到 waveview CLI，请先安装到 ~/.local/bin（例如 uv tool install git+https://github.com/zhangwwpeng/waveview）\n```\n\n```python\n" +
 			code +
 			"\n```";
 		WAVE_CACHE.set(code, out);

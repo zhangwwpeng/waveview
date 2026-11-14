@@ -17,3 +17,4 @@ out/
 # Local agent state
 .omp/
 .agents/
+node_modules/

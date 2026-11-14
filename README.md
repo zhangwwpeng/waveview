@@ -58,6 +58,13 @@ uv tool install -e .
 uv tool install git+https://github.com/zhangwwpeng/waveview
 ```
 
+若使用 `omp` TUI 内联渲染波形图，安装插件并在 `~/.omp/agent/config.yml` 开启 `extensionRenderers.assistantText: true`：
+
+```bash
+# 从 GitHub 直接安装（或本地仓库根目录执行 omp plugin link .）
+omp install github:zhangwwpeng/waveview
+```
+
 若要在仓库内开发与跑测试，可使用项目虚拟环境：
 
 ```bash
@@ -79,14 +86,14 @@ waveview render examples/apb.py -o out/apb.svg
 
 - **Python 编程核对**：任意 `Diagram` 支持 `d.sample("clk")`（返回每个有效边沿的 `sampled`→`after` 寄存器采样变化）、`d.to_dict()` 和 `d.inspect("text" | "json")`。
 - **内置 Skill**：见 [skills/waveview/SKILL.md](skills/waveview/SKILL.md)。
-- **omp TUI 渲染插件**：见 [plugins/omp-waveview](plugins/omp-waveview)（通过 `omp plugin link ./plugins/omp-waveview` 安装，将回复中的 `python_wave` 代码块内联渲染为 SVG）。
+- **omp TUI 渲染插件**：见 [extensions/waveview.ts](extensions/waveview.ts)（通过 `omp install github:zhangwwpeng/waveview` 或本机 `omp plugin link .` 安装，将回复中的 `python_wave` 代码块内联渲染为 SVG）。
 
 ## 文档导航
 
 - **[完整用户指南 (docs/guide.md)](docs/guide.md)**：涵盖时间/频率/相位单位、门控时钟、所有 API 参数说明、主题配色键、AI 自检与时序采样、排错 FAQ 与协议实战示例。
 - **[设计文档 (docs/design.md)](docs/design.md)**：动机、设计取舍与实现进度。
 - **[waveview Skill (skills/waveview/SKILL.md)](skills/waveview/SKILL.md)**：TUI 内联画图闭环、`waveview check` 自检流程与 JSON Schema 速查。
-- **[omp 渲染插件 (plugins/omp-waveview/README.md)](plugins/omp-waveview/README.md)**：将 `python_wave` 围栏在 TUI 中渲染为内联波形图的独立插件与安装说明。
+- **[omp 渲染插件源码 (extensions/waveview.ts)](extensions/waveview.ts)**：将 `python_wave` 围栏在 TUI 中渲染为内联波形图的扩展实现。
 - **示例脚本（`examples/`）**：
   - [handshake.py](examples/handshake.py) —— 单时钟 `valid`/`ready` 握手与因果箭头
   - [cdc.py](examples/cdc.py) —— 异步双时钟两级触发器同步与亚稳态高亮

@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "description": "Oh My Pi (omp) assistant text renderer plugin for waveview (renders ```python_wave / ```waveview / ```img blocks inline as SVG)",
   "type": "module",
-  "main": "./index.ts",
+  "main": "./extensions/waveview.ts",
   "keywords": [
     "omp-plugin",
     "pi-package",
@@ -12,12 +12,12 @@
   ],
   "omp": {
     "extensions": [
-      "./index.ts"
+      "./extensions/waveview.ts"
     ]
   },
   "pi": {
     "extensions": [
-      "./index.ts"
+      "./extensions/waveview.ts"
     ]
   },
   "peerDependencies": {

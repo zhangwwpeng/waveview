@@ -290,7 +290,7 @@ png_bytes = d.to_png(scale=2)          # 获取 PNG 二进制字节流
 ### 8.2 Notebook 与扩展内联渲染
 
 - **Jupyter / IPython / Marimo**：`Diagram` 实现了 `_repr_svg_()`，在单元格最后一行直接写 `d` 即可直接内联出图。
-- **`omp` TUI 渲染插件**（[plugins/omp-waveview](../plugins/omp-waveview)）：通过 `omp plugin link ./plugins/omp-waveview` 并在 `~/.omp/agent/config.yml` 开启 `extensionRenderers.assistantText: true` 后，回复中的 ```` ```python_wave ```` 代码块会在后台运行并自动替换成内联 SVG（支持任意变量名的 `Diagram` 实例，且跨任意工作目录可用）。
+- **`omp` TUI 渲染插件**（[extensions/waveview.ts](../extensions/waveview.ts)）：通过 `omp install github:zhangwwpeng/waveview`（或本地仓库根目录执行 `omp plugin link .`）并在 `~/.omp/agent/config.yml` 开启 `extensionRenderers.assistantText: true` 后，回复中的 ```` ```python_wave ```` 代码块会在后台运行并自动替换成内联 SVG（支持任意变量名的 `Diagram` 实例，且跨任意工作目录可用；可用 `WAVEVIEW_BIN` 覆盖 CLI 路径）。
 
 ### 8.3 文本校对、AI 自检与时序采样
 

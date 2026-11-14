@@ -6,7 +6,7 @@ description: Use when drawing digital hardware timing diagrams in TUI responses 
 # waveview Skill
 
 Use `waveview` for two tightly connected workflows:
-1. **Drawing waveforms in TUI replies** using ```` ```python_wave ```` blocks (rendered inline by `plugins/omp-waveview`).
+1. **Drawing waveforms in TUI replies** using ```` ```python_wave ```` blocks (rendered inline by `extensions/waveview.ts`).
 2. **Self-checking and recognizing timing in Python/CLI** via `waveview check`, `d.sample()`, `d.to_dict()`, and `d.inspect()`—without generating or viewing PNG images.
 
 ## Workflow A: TUI 内联画图闭环（先验再发）

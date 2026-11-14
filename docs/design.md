@@ -324,7 +324,7 @@ d.save("cdc.png")
 - 门控时钟与循环体验：`d.clock(..., start=, stop=, gated=, idle=)` 与 `clk.enable()` / `clk.disable()` 支持 SPI/I2C 等间歇时钟；新增 `Diagram(..., warn_noop=False)` 关闭循环同值警告；`save()` 自动创建父目录；实现 `_repr_svg_()` 支持 Notebook 内联显示
 - 示例：`examples/` 下 handshake（单时钟）、cdc（异步双时钟）、burst（断开 / 标记 / 高阻 / 深色）、spi（手动翻转）、gated_spi（门控时钟 + `warn_noop=False`）、apb（APB 写 / 读 + 等待周期，bamboo 主题）
 - 快照测试：`tests/snapshots/`，改了渲染后用 `UPDATE_SNAPSHOTS=1 uv run pytest` 更新
-- 对话内显示扩展：[plugins/omp-waveview](../plugins/omp-waveview) 独立插件自动运行 ```` ```python_wave ````（不限变量名为 `d`）并内联显示 SVG；同时保留对 ```` ```img ```` 嵌入截图的支持
+- 对话内显示扩展：[extensions/waveview.ts](../extensions/waveview.ts) 插件（根目录 `package.json`）自动运行 ```` ```python_wave ````（不限变量名为 `d`）并内联显示 SVG；同时保留对 ```` ```img ```` 嵌入截图的支持
 
 ### 历史已知问题解决情况
 1. ~~不支持门控时钟~~ → 已解决：新增 `start`/`stop`/`gated`/`idle` 与 `clk.enable()`/`clk.disable()`，见 [examples/gated_spi.py](../examples/gated_spi.py)
