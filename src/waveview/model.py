@@ -355,6 +355,13 @@ class Measure:
 
 
 @dataclass
+class Note:
+    row: Row
+    time: Fraction
+    label: str
+
+
+@dataclass
 class Gap:
     start: Fraction
     end: Fraction
@@ -369,4 +376,4 @@ class Step:
     changes: list[tuple[Signal, Value, Value]]  # signal, old, new
 
 
-Annotation = Arrow | Region | Marker | Measure
+Annotation = Arrow | Region | Marker | Measure | Note

@@ -254,3 +254,61 @@ print("noise on stdout")
     captured2 = capsys.readouterr()
     assert captured2.out.lstrip().startswith("<svg")
     ET.fromstring(captured2.out)
+
+
+def test_describe_to_dict_inspect_and_crowded_notes(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+):
+    d = Diagram(title="Annotated Bus", theme="bamboo")
+    clk = d.clock("clk", period="10ns")
+    req = d.wire("req", init=0)
+    e1 = d.posedge(clk)(req=1)
+    d.posedge(clk)(req=0)
+    d.note(e1.req, "发起请求")
+    d.caption("图注说明一：同步采样。", "图注说明二：单拍有效。")
+
+    desc = d.describe()
+    assert '注释：req@0ns "发起请求"' in desc
+    assert "图注：图注说明一：同步采样。" in desc
+    assert "图注：图注说明二：单拍有效。" in desc
+
+    info = d.to_dict()
+    assert info["ok"] is True
+    assert info["canvas"]["crowded_notes"] == []
+    assert info["annotations"] == [
+        {"type": "note", "target": "req@0ns", "row": "req", "time": "0ns", "label": "发起请求"}
+    ]
+    assert info["captions"] == ["图注说明一：同步采样。", "图注说明二：单拍有效。"]
+
+    text_report = d.inspect("text")
+    assert '注释：req@0ns "发起请求"' in text_report
+    assert "图注：图注说明二：单拍有效。" in text_report
+
+    # Construct an ultra-dense cluster of 16 notes on the exact same row/time to exhaust candidate offsets.
+    dense = Diagram(title="Dense Notes")
+    d_clk = dense.clock("clk", period="10ns")
+    sig = dense.wire("sig", init=0)
+    dense.posedge(d_clk)(sig=1)
+    for i in range(16):
+        dense.note(sig, "10ns", f"NOTE_{i:02d}")
+
+    dense_info = dense.to_dict()
+    assert dense_info["canvas"]["crowded_notes"]
+    assert any("注释拥挤：" in issue for issue in dense_info["layout_issues"])
+    assert dense_info["ok"] is False
+
+    # Verify CLI `--strict` exits 2 on crowded_notes.
+    dense_script = "\n".join(
+        [
+            "from waveview import Diagram",
+            "d = Diagram(end='20ns')",
+            "c = d.clock('clk', period='10ns')",
+            "s = d.wire('s', init=0)",
+            "d.posedge(c)(s=1)",
+            *[f"d.note(s, '10ns', 'N{i}')" for i in range(16)],
+        ]
+    )
+    monkeypatch.setattr("sys.stdin", io.StringIO(dense_script))
+    assert cli_main(["check", "-", "--strict"]) == 2
+    assert "注释拥挤：" in capsys.readouterr().out

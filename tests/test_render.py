@@ -184,3 +184,57 @@ def test_sub_millisecond_ticks_format_distinctly():
     ]
     assert len(set(ticks)) >= 10
     assert "0.0005" in ticks
+
+
+@pytest.mark.parametrize("theme", sorted(THEMES))
+def test_note_and_caption_render_across_themes_and_expand_canvas(theme):
+    from waveview import Diagram
+    from waveview.svg import render_with_stats
+
+    def build(with_annotations: bool):
+        d = Diagram(title="Note & Caption", theme=theme)
+        clk = d.clock("clk", period="10ns")
+        req = d.wire("req", init=0)
+        data = d.bus("data", init="x", width=8)
+        e1 = d.posedge(clk)(req=1, data=0x3C)
+        e2 = d.posedge(clk)(req=0, data=0x7E)
+        d.posedge(clk)(data="x")
+        if with_annotations:
+            d.note(clk, "10ns", "Clock & Edge")
+            d.note(e1.req, "Assert <req>")
+            d.note(req, "25ns", "Deasserted")
+            d.note(data, "15ns", "Payload")
+            d.caption(
+                "Note 1: Valid transaction occurs when req == 1 & clk rises.",
+                "Note 2: A very long explanatory footer line designed to expand canvas width cleanly.",
+            )
+        return d
+
+    svg_plain, stats_plain = render_with_stats(build(False))
+    svg_annotated, stats_annotated = render_with_stats(build(True))
+    ET.fromstring(svg_plain)
+    ET.fromstring(svg_annotated)
+
+    assert "Assert &lt;req&gt;" in svg_annotated
+    assert "Clock &amp; Edge" in svg_annotated
+    assert "Note 1: Valid transaction occurs when req == 1 &amp; clk rises." in svg_annotated
+    assert THEMES[theme]["note"] in svg_annotated
+    assert stats_annotated.height > stats_plain.height
+    assert stats_annotated.width > stats_plain.width
+    assert stats_annotated.crowded_notes == []
+
+
+def test_out_of_end_note_clips_with_warning():
+    from waveview import Diagram, WaveWarning
+
+    d = Diagram(end="20ns")
+    clk = d.clock("clk", period="10ns")
+    sig = d.wire("sig", init=0)
+    d.posedge(clk)(sig=1)
+    d.note(sig, "10ns", "VISIBLE_NOTE")
+    d.note(sig, "40ns", "OUT_OF_RANGE_NOTE")
+    with pytest.warns(WaveWarning):
+        svg = d.to_svg()
+    ET.fromstring(svg)
+    assert "VISIBLE_NOTE" in svg
+    assert "OUT_OF_RANGE_NOTE" not in svg

@@ -221,7 +221,7 @@ with d.group("主机接口"):
 
 ---
 
-## 6. 事件句柄 `Event` 与四类时序标注
+## 6. 事件句柄 `Event` 与时序标注
 
 每次赋值（`d.posedge(...)(...)`、`d.set(...)` 等）都会返回一个 `Event` 实例 `e`：
 
@@ -229,24 +229,31 @@ with d.group("主机接口"):
 - 可用 `req in e` 或 `"req" in e` 判断某信号是否在该事件中被赋值。
 - **常见误区**：`Event` 只包含**那条语句里真正赋了值的信号**，访问未赋值的信号会抛出明确报错；另外 `d.posedge(clk)` 没加 `(...)` 赋值时返回的是 `Wait` 而不是 `Event`，不能写 `d.posedge(clk).req`。
 
-### 四类标注 API
+### 五类图内标注与底部图注 API
 
 1. **因果箭头 `d.arrow(src, dst, label=None)`**
    - `src` 和 `dst` 必须是通过 `Event` 取出的信号跳变 `Point`（如 `e1.valid` → `e2.ready`），不能是同一个跳变点，也不能跨图表混用。
    - 自动绘制平滑曲线并在中间放置带描边的文字徽章；若遇到总线文本、高亮标题或其他箭头徽章，会自动沿曲线选位或上下错开，并在绘图区左右边界内防裁切。
    - 同一根信号前后两点之间的 `arrow` 会自动画出上拱弧线。
 
-2. **区间高亮 `d.region(row, start, end, label=None)`**
+2. **单点气泡注释 `d.note(target, ...)`**
+   - 两种调用方式：直接传事件跳变点 `d.note(e.ready, "从机就绪")`，或传信号/时钟与时刻 `d.note(clk, "20ns", "采样沿")`（不画贯穿全图的竖线）。
+   - 在锚点位置画出圆点、引线与圆角标签徽章，并自动避让总线文字、区域标题、标记、因果箭头及其他注释；仍存在重叠时会在 `waveview check` 的 `crowded_notes` 中报警。
+
+3. **区间高亮 `d.region(row, start, end, label=None)`**
    - 在指定信号或时钟行 `row`（对象或名字字符串）的 `[start, end]` 区间下方衬一层半透明虚线框，上方放标签。
    - `start` / `end` 可传任意 `TimeRef`（`Event`、`Point`、`d.now`、`Wait`、时间字符串、数字或 `Fraction`），要求 `0 <= start < end`。
 
-3. **纵向参考线 `d.marker(at=None, label=None)`**
+4. **纵向参考线 `d.marker(at=None, label=None)`**
    - 在指定时刻 `at`（不传时默认取 `d.now`）画一条贯穿所有信号直到坐标轴的垂直虚线，上方显示标签胶囊。
    - 多个位置相近、标签会横向碰头的 `marker` 会自动错开到不同高度层，画布顶部也会同步自动增高。
 
-4. **时间间隔测量 `d.measure(start, end, label=None)`**
+5. **时间间隔测量 `d.measure(start, end, label=None)`**
    - 在波形底部画出双向测量箭头；若不传 `label`，自动填写精准格式化后的耗时（如 `"20ns"`）。
    - 时间区间互相不重叠的多条 `measure` 会智能复用同一水平泳道，节省垂直空白；重叠的 `measure` 会自动分列不同泳道。
+
+6. **底部图注 `d.caption(*texts)`**
+   - 在时间轴下方左对齐绘制一条或多条说明文字（传入多行字符串会自动按 `\n` 拆分），类似芯片手册中的 `Note 1 / Note 2`；画布宽度与高度会自动随内容扩展，适合存放较长的协议备注或前提说明。
 
 ---
 
@@ -264,12 +271,12 @@ with d.group("主机接口"):
 
 ### 添加自定义主题
 
-查看 [src/waveview/themes.py](../src/waveview/themes.py) 中的 `THEMES` 字典。每套主题包含完全一致的 **25 个颜色键**：
+查看 [src/waveview/themes.py](../src/waveview/themes.py) 中的 `THEMES` 字典。每套主题包含完全一致的 **26 个颜色键**：
 
 - 页面与容器：`bg`、`plot_bg`、`row_alt`、`border`、`grid`、`rail`、`badge_bg`
 - 文字层级：`title`、`text`、`group`、`muted`
 - 波形本体：`clock`、`wave`、`bus`、`bus_text`、`z`、`x`
-- 四类标注：`region`、`region_text`、`arrow`、`marker`、`marker_bg`、`marker_border`、`marker_text`、`measure`
+- 标注类：`region`、`region_text`、`arrow`、`marker`、`marker_bg`、`marker_border`、`marker_text`、`measure`、`note`
 
 只要保持键名集合与 `THEMES["light"]` 一致，即可新增自定义主题并在单元测试中通过调色板校验。
 
@@ -299,7 +306,7 @@ png_bytes = d.to_png(scale=2)          # 获取 PNG 二进制字节流
   1. 有事件或标注超出了手动设置的 `end`；
   2. 某信号从未被赋值过且初值为 `"x"`（整行全是未知阴影）。
 - **`d.sample(clk, edge="rise", *, include_gaps=False)`**：按时钟有效边沿逐拍采样全部信号，返回 `[{"edge": 1, "time": "5ns", "time_s": 5e-9, "signals": {name: {"sampled": ..., "after": ..., "changed": bool}}}, ...]`，其中 `sampled` 为边沿到达前一瞬间的值（触发器采样值），`after` 为边沿后的更新值。
-- **`d.to_dict()` / `d.inspect(fmt="text" | "json")`**：一次输出 `ok`、`svg_valid`、画布尺寸与布局诊断（`truncated_labels` / `dropped_labels` / `crowded_arrows`）、`warnings`、`layout_issues`、`steps` 及各时钟 `clock_samples`，让 AI 无需生成或读取 PNG 图片即可完成版式与时序双重验证。
+- **`d.to_dict()` / `d.inspect(fmt="text" | "json")`**：一次输出 `ok`、`svg_valid`、画布尺寸与布局诊断（`truncated_labels` / `dropped_labels` / `crowded_arrows` / `crowded_notes`）、`warnings`、`layout_issues`、`steps` 及各时钟 `clock_samples`，让 AI 无需生成或读取 PNG 图片即可完成版式与时序双重验证。
 
 ### 8.4 CLI 命令与 Skill 封装
 

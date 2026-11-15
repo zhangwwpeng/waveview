@@ -355,3 +355,63 @@ def test_gated_clock_validation_and_negative_annotations():
         d.region(sig, "-1ns", "5ns")
     with pytest.raises(WaveError, match="负数"):
         d.measure("-1ns", "5ns")
+
+
+def test_note_and_caption_api_and_validation():
+    import warnings
+    from waveview.model import Note
+
+    d1, clk1, req1, data1 = make()
+    d2, clk2, req2, _ = make()
+
+    e1 = d1.posedge(clk1)(req=1, data=0x12)
+    e2 = d1.posedge(clk1)(req=0)
+    d1.note(e1.req, "拉高请求")
+    d1.note(clk1, "20ns", "采样沿")
+    d1.note("data", d1.now, "数据保持")
+    d1.caption("注 1：valid 与 ready 同拍采样。", "注 2：第二行\n注 3：多行自动拆分")
+
+    notes = [a for a in d1.annotations if isinstance(a, Note)]
+    assert [(n.row.name, n.time, n.label) for n in notes] == [
+        ("req", 0, "拉高请求"),
+        ("clk", 20 * NS, "采样沿"),
+        ("data", 10 * NS, "数据保持"),
+    ]
+    assert d1.captions == ["注 1：valid 与 ready 同拍采样。", "注 2：第二行", "注 3：多行自动拆分"]
+
+    # Out-of-end note contributes to _last_time() and emits WaveWarning when clipped.
+    d1_tight = Diagram(end="15ns")
+    c_tight = d1_tight.clock("clk", period="10ns")
+    r_tight = d1_tight.wire("req", init=0)
+    d1_tight.posedge(c_tight)(req=1)
+    d1_tight.note(r_tight, "30ns", "越界注释")
+    assert d1_tight._last_time() == 30 * NS
+    with pytest.warns(UserWarning, match="超出了"):
+        d1_tight.check()
+
+    # Validation errors for note()
+    e_other = d2.posedge(clk2)(req=1)
+    with pytest.raises(WaveError, match="非空字符串"):
+        d1.note(e1.req, "   ")
+    with pytest.raises(WaveError, match="自带时间"):
+        d1.note(e1.req, "10ns", "重复时间")  # type: ignore[arg-type]
+    with pytest.raises(WaveError, match="不属于当前图表"):
+        d1.note(e_other.req, "跨图")
+    with pytest.raises(WaveError, match="指定时间"):
+        d1.note(req1, "缺少时间")
+    with pytest.raises(WaveError, match="非空字符串"):
+        d1.note(req1, "10ns", "")
+    with pytest.raises(WaveError, match="负数"):
+        d1.note(req1, "-5ns", "负时间")
+    with pytest.raises(WaveError, match="不属于当前图表"):
+        d1.note(clk2, "10ns", "跨图时钟")
+
+    # Validation errors for caption()
+    with pytest.raises(WaveError, match="至少需要"):
+        d1.caption()
+    with pytest.raises(WaveError, match="字符串"):
+        d1.caption(123)  # type: ignore[arg-type]
+    with pytest.raises(WaveError, match="不能为空"):
+        d1.caption("   \n  ")
+    with warnings.catch_warnings(record=True):
+        pass

@@ -9,7 +9,7 @@ from fractions import Fraction
 from typing import TYPE_CHECKING, Any, Literal
 
 from .errors import WaveError, WaveWarning
-from .model import Arrow, Clock, EdgeKind, Marker, Measure, Region, Signal
+from .model import Arrow, Clock, EdgeKind, Marker, Measure, Note, Region, Signal
 from .svg import TimeMap, _merge_gaps, render_with_stats
 from .units import format_freq, format_time
 
@@ -118,6 +118,10 @@ def to_dict(
         layout_issues.append(
             f'箭头拥挤：{item["src"]} → {item["dst"]} "{item["label"]}" 与其他文字存在 {item["overlaps"]} 处重叠'
         )
+    for item in stats.crowded_notes:
+        layout_issues.append(
+            f'注释拥挤：{item["target"]} "{item["label"]}" 与其他文字存在 {item["overlaps"]} 处重叠'
+        )
     if stats.hit_width_cap and (stats.truncated_labels or stats.dropped_labels):
         layout_issues.append(
             "画布已达 2400px 自动宽度上限；可显式传 Diagram(px_per_ns=...) 或用 d.gap(...) 折叠长空闲"
@@ -222,6 +226,16 @@ def to_dict(
                     "label": a.label,
                 }
             )
+        elif isinstance(a, Note):
+            ann_data.append(
+                {
+                    "type": "note",
+                    "target": f"{a.row.name}@{format_time(a.time, ts)}",
+                    "row": a.row.name,
+                    "time": format_time(a.time, ts),
+                    "label": a.label,
+                }
+            )
 
     gaps_merged = _merge_gaps(d.gaps, end)
     ok = svg_valid and not all_warnings and not layout_issues
@@ -242,6 +256,7 @@ def to_dict(
             "truncated_labels": stats.truncated_labels,
             "dropped_labels": stats.dropped_labels,
             "crowded_arrows": stats.crowded_arrows,
+            "crowded_notes": stats.crowded_notes,
         },
         "warnings": all_warnings,
         "layout_issues": layout_issues,
@@ -251,6 +266,7 @@ def to_dict(
         "clock_samples": {c.name: sample_clock(d, c, "rise") for c in clocks},
         "gaps": [{"start": format_time(g.start, ts), "end": format_time(g.end, ts)} for g in gaps_merged],
         "annotations": ann_data,
+        "captions": list(d.captions),
     }
 
 

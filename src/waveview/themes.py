@@ -10,7 +10,7 @@ change.  Keys:
 ``clock`` clock trace, ``wave`` wire trace, ``bus``/``bus_text`` bus body and
 value, ``z`` high-Z, ``x`` unknown, ``region``/``region_text`` highlight,
 ``arrow`` causality arrow, ``marker``/``marker_bg``/``marker_border``/
-``marker_text`` vertical marker, ``measure`` dimension line.
+``marker_text`` vertical marker, ``measure`` dimension line, ``note`` callout annotation.
 """
 
 THEMES: dict[str, dict[str, str]] = {
@@ -40,6 +40,7 @@ THEMES: dict[str, dict[str, str]] = {
         "marker_border": "#cbd5e1",
         "marker_text": "#334155",
         "measure": "#059669",
+        "note": "#0d9488",
     },
     "dark": {
         "bg": "#0b1017",
@@ -67,6 +68,7 @@ THEMES: dict[str, dict[str, str]] = {
         "marker_border": "#2e4059",
         "marker_text": "#cbd5e1",
         "measure": "#34d399",
+        "note": "#2dd4bf",
     },
     "bamboo": {
         "bg": "#1c221c",
@@ -94,5 +96,6 @@ THEMES: dict[str, dict[str, str]] = {
         "marker_border": "#4c614a",
         "marker_text": "#e8e2ce",
         "measure": "#6cb6eb",
+        "note": "#e69875",
     },
 }

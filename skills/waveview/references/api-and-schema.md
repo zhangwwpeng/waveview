@@ -47,6 +47,8 @@ Event handles:
 - `d.region(row: Row | str, start: TimeRef, end: TimeRef, label: str | None = None)`
 - `d.marker(at: TimeRef | None = None, label: str | None = None)` (`at=None` uses `d.now`)
 - `d.measure(start: TimeRef, end: TimeRef, label: str | None = None)`
+- `d.note(target: Point, label: str)` or `d.note(row: Row | str, at: TimeRef, label: str)` — single-point callout dot + leader line + pill badge (for concise on-wave notes without full-height marker lines)
+- `d.caption(*texts: str)` — explanatory footer note line(s) rendered below the bottom time axis (multiline strings split on `\n`; automatically expands SVG canvas height/width)
 - `d.describe() -> str` — chronological action playback (`old->new`).
 - `d.check() -> None` — emits `WaveWarning` if content exceeds `end` or any signal remains un-driven with `init="x"`.
 - `d.to_svg() -> str` / `d.to_png(scale=2) -> bytes` / `d.save(path, scale=2) -> None` (`.svg` or `.png`).
@@ -105,7 +107,8 @@ Event handles:
     "hit_width_cap": false,
     "truncated_labels": [],
     "dropped_labels": [],
-    "crowded_arrows": []
+    "crowded_arrows": [],
+    "crowded_notes": []
   },
   "warnings": [],
   "layout_issues": [],
@@ -158,8 +161,10 @@ Event handles:
   },
   "gaps": [{"start": "80ns", "end": "140ns"}],
   "annotations": [
-    {"type": "arrow", "src": "valid@10ns", "dst": "ready@20ns", "label": "accept"}
-  ]
+    {"type": "arrow", "src": "valid@10ns", "dst": "ready@20ns", "label": "accept"},
+    {"type": "note", "target": "ready@20ns", "row": "ready", "time": "20ns", "label": "slave ready"}
+  ],
+  "captions": ["Note: Transfer occurs on the clock edge where both valid and ready are 1."]
 }
 ```
 
@@ -177,10 +182,12 @@ ready = d.wire("ready", init=0)
 data = d.bus("data", init="x", width=8)
 
 e_req = d.posedge(clk)(valid=1, data=0xA1)
-d.posedge(clk)(ready=1)
+e_rdy = d.posedge(clk)(ready=1)
 e_hs = d.posedge(clk)(data=0xB2)
 d.arrow(e_req.valid, e_hs.data, "transfer 1")
+d.note(e_rdy.ready, "slave ready")
 d.posedge(clk)(valid=0, ready=0, data="x")
+d.caption("Note: Transfer beats occur at @posedge clk when valid == 1 && ready == 1.")
 ```
 
 ### Dual-Clock CDC (2-FF Synchronizer)

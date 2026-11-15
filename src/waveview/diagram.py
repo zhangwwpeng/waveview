@@ -25,6 +25,7 @@ from .model import (
     Gap,
     Marker,
     Measure,
+    Note,
     Point,
     Region,
     Row,
@@ -145,6 +146,7 @@ class Diagram:
 
         self.rows: list[Row] = []
         self.annotations: list[Annotation] = []
+        self.captions: list[str] = []
         self.gaps: list[Gap] = []
         self.steps: list[Step] = []
 
@@ -465,6 +467,54 @@ class Diagram:
             raise WaveError("measure 的结束时间必须晚于开始时间")
         self.annotations.append(Measure(a, b, label))
 
+    def note(
+        self,
+        target: Point | Row | str,
+        text_or_at: str | TimeRef,
+        text: str | None = None,
+    ) -> None:
+        """Attach a single-point callout note: ``d.note(e.ready, "...")`` or ``d.note(clk, "20ns", "...")``."""
+        if isinstance(target, Point):
+            if text is not None:
+                raise WaveError('传入事件跳变点（如 e.sig）时它已自带时间，请直接写 d.note(e.sig, "说明")')
+            if not isinstance(text_or_at, str) or not text_or_at.strip():
+                raise WaveError("note 的注释文字必须是非空字符串")
+            if not any(r is target.signal for r in self.rows):
+                raise WaveError(f'note 的目标信号 "{target.signal.name}" 不属于当前图表')
+            if target.time < 0:
+                raise WaveError("note 的时间不能是负数")
+            self.annotations.append(Note(target.signal, target.time, text_or_at.strip()))
+            return
+
+        row = self._row(target)
+        if text is None:
+            raise WaveError(
+                '在信号或时钟上添加 note 需要指定时间，例如 d.note(sig, d.now, "说明")，'
+                '或直接传跳变点 d.note(e.sig, "说明")'
+            )
+        if not isinstance(text, str) or not text.strip():
+            raise WaveError("note 的注释文字必须是非空字符串")
+        t = self._resolve(text_or_at)
+        if t < 0:
+            raise WaveError("note 的时间不能是负数")
+        self.annotations.append(Note(row, t, text.strip()))
+
+    def caption(self, *texts: str) -> None:
+        """Add one or more explanatory footer lines below the time axis."""
+        if not texts:
+            raise WaveError("caption 至少需要传入一条非空注释文字")
+        added = 0
+        for item in texts:
+            if not isinstance(item, str):
+                raise WaveError(f"caption 的内容必须是字符串，收到的是 {item!r}")
+            for raw_line in item.splitlines():
+                line = raw_line.strip()
+                if line:
+                    self.captions.append(line)
+                    added += 1
+        if added == 0:
+            raise WaveError("caption 的注释文字不能为空")
+
     # ---- finishing ----------------------------------------------------
 
     def _last_time(self) -> Fraction:
@@ -484,7 +534,7 @@ class Diagram:
         for a in self.annotations:
             if isinstance(a, Arrow):
                 times += [a.src.time, a.dst.time]
-            elif isinstance(a, Marker):
+            elif isinstance(a, (Marker, Note)):
                 times.append(a.time)
             else:
                 times.append(a.end)

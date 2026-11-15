@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from .model import Arrow, Clock, Marker, Measure, Region, Signal
+from .model import Arrow, Clock, Marker, Measure, Note, Region, Signal
 from .units import format_freq, format_time
 
 if TYPE_CHECKING:
@@ -66,6 +66,11 @@ def describe(d: Diagram) -> str:
             lines.append(f"标记：{t(a.time)}{label}")
         elif isinstance(a, Measure):
             lines.append(f"测量：{t(a.start)} ~ {t(a.end)}（{t(a.end - a.start)}）{label}")
+        elif isinstance(a, Note):
+            lines.append(f"注释：{a.row.name}@{t(a.time)}{label}")
+
+    for cap in d.captions:
+        lines.append(f"图注：{cap}")
 
     lines.append(f"结束：{t(d.end)}")
     return "\n".join(lines)

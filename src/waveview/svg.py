@@ -9,7 +9,7 @@ from fractions import Fraction
 from html import escape
 from typing import TYPE_CHECKING, Any
 
-from .model import Arrow, Clock, Gap, Marker, Measure, Region, Row, Signal
+from .model import Arrow, Clock, Gap, Marker, Measure, Note, Region, Row, Signal
 from .themes import THEMES
 from .units import TIME_UNITS, format_time
 
@@ -39,6 +39,9 @@ AXIS_H = 32
 GAP_W = 20
 LABEL_SIZE = 12.5
 VALUE_SIZE = 11
+CAPTION_SIZE = 11
+CAPTION_LINE_H = 18
+CAPTION_TOP_GAP = 10
 
 _WIDE_SYMBOLS = frozenset("←→↑↓↔⇒⇐…—–")
 
@@ -133,6 +136,7 @@ class RenderStats:
     truncated_labels: list[dict[str, Any]] = field(default_factory=list)
     dropped_labels: list[dict[str, Any]] = field(default_factory=list)
     crowded_arrows: list[dict[str, Any]] = field(default_factory=list)
+    crowded_notes: list[dict[str, Any]] = field(default_factory=list)
 
 
 def _scale_with_cap(d: Diagram, visible_span: Fraction, gaps: list[Gap], end: Fraction) -> tuple[float, bool]:
@@ -351,6 +355,7 @@ def render_with_stats(d: Diagram) -> tuple[str, RenderStats]:
         and Fraction(0) <= a.dst.time <= end
     ]
     regions = [a for a in d.annotations if isinstance(a, Region) and a.end > 0 and a.start < end]
+    notes = [a for a in d.annotations if isinstance(a, Note) and Fraction(0) <= a.time <= end]
 
     # ---- horizontal time mapping & left label width ----
     label_w = 0.0
@@ -426,6 +431,8 @@ def render_with_stats(d: Diagram) -> tuple[str, RenderStats]:
     y += marker_band_h
     if d.rows and any(a.src.signal is a.dst.signal and a.src.signal is d.rows[0] for a in arrows):
         y += 14
+    if d.rows and not d.rows[0].groups and any(n.row is d.rows[0] for n in notes):
+        y += 18
     rows_top = y
 
     boxes: list[RowBox] = []
@@ -459,8 +466,22 @@ def render_with_stats(d: Diagram) -> tuple[str, RenderStats]:
     axis_y = lanes_top + len(measure_lanes) * LANE_H + 8
     height = axis_y + AXIS_H + PAD
 
+    captions_top: float | None = None
+    caption_right = 0.0
+    if d.captions:
+        captions_top = axis_y + AXIS_H + CAPTION_TOP_GAP
+        height = captions_top + len(d.captions) * CAPTION_LINE_H + PAD - 4
+        caption_right = max(PAD + text_width(line, CAPTION_SIZE) + PAD for line in d.captions)
+
+    note_min_right = max(x0 + text_width(n.label, 10.5) + 16 + PAD for n in notes) if notes else 0.0
     title_right = (PAD + text_width(d.title, 15.5) + PAD) if d.title else 0.0
-    width = max(x_end + PAD + 26, title_right, marker_max_right + PAD if marker_max_right else 0.0)
+    width = max(
+        x_end + PAD + 26,
+        title_right,
+        marker_max_right + PAD if marker_max_right else 0.0,
+        caption_right,
+        note_min_right,
+    )
     stats.width = round(width, 2)
     stats.height = round(height, 2)
 
@@ -637,6 +658,41 @@ def render_with_stats(d: Diagram) -> tuple[str, RenderStats]:
     arrow_labels: list[Box2D] = []
     for a in arrows:
         _draw_arrow(cv, a, by_row, tm, x0, x_end, region_labels, bus_labels, arrow_labels, d.timescale, stats)
+
+    # ---- single-point callout notes ----
+    if notes:
+        marker_labels: list[Box2D] = [
+            (cx, (rows_top - 8 - lane_idx * 20) - 1.8, text_width(m.label, 10.5) / 2 + 5.5, 7.1)
+            for m, cx, lane_idx in marker_items
+            if m.label
+        ]
+        note_labels: list[Box2D] = []
+        min_note_cy = (PAD + TITLE_H if d.title else PAD) + 5.5
+        max_note_cy = max(min_note_cy, axis_y - 10.0)
+        for n in notes:
+            _draw_note(
+                cv,
+                n,
+                by_row,
+                tm,
+                x0,
+                x_end,
+                min_note_cy,
+                max_note_cy,
+                region_labels,
+                bus_labels,
+                arrow_labels,
+                marker_labels,
+                note_labels,
+                d.timescale,
+                stats,
+            )
+
+    # ---- footer captions ----
+    if captions_top is not None:
+        cv.line(PAD, captions_top - 6, width - PAD, captions_top - 6, c["border"], width=1, opacity=0.5)
+        for idx, line in enumerate(d.captions):
+            cv.text(PAD, captions_top + idx * CAPTION_LINE_H + 11, line, c["marker_text"], size=CAPTION_SIZE)
 
     hi_top = "0.18" if is_dark else "0.12"
     bus_top = "0.18" if is_dark else "0.11"
@@ -942,3 +998,99 @@ def _draw_arrow(
             bg_fill=c["badge_bg"],
             bg_stroke=c["arrow"],
         )
+
+
+def _note_anchor_y(b: RowBox, n: Note) -> float:
+    row = n.row
+    if isinstance(row, Clock):
+        if row._edge_kind_at(n.time) is not None:
+            return b.mid
+        return b.hi if row.level_at(n.time) == 1 else b.lo
+    before = row.value_before(n.time)
+    after = row.value_at(n.time)
+    if n.time > 0 and (type(before) is not type(after) or before != after):
+        return b.mid
+    if row.kind == "wire":
+        if after == 1:
+            return b.hi
+        if after == 0:
+            return b.lo
+    return b.mid
+
+
+def _draw_note(
+    cv: Canvas,
+    n: Note,
+    by_row: dict[int, RowBox],
+    tm: TimeMap,
+    x0: float,
+    x_end: float,
+    min_cy: float,
+    max_cy: float,
+    region_labels: list[Box2D],
+    bus_labels: list[Box2D],
+    arrow_labels: list[Box2D],
+    marker_labels: list[Box2D],
+    note_labels: list[Box2D],
+    timescale: str = "ns",
+    stats: RenderStats | None = None,
+) -> None:
+    c = cv.c
+    col = c["note"]
+    b = by_row[id(n.row)]
+    ax = tm.x(n.time)
+    ay = _note_anchor_y(b, n)
+
+    half_w = text_width(n.label, 10.5) / 2 + 5.5
+    half_h = 7.1
+    obstacles = region_labels + bus_labels + arrow_labels + marker_labels + note_labels
+
+    above = [(0.0, -21.0), (22.0, -21.0), (-22.0, -21.0), (32.0, -30.0), (-32.0, -30.0), (0.0, -32.0)]
+    below = [(0.0, 19.0), (22.0, 19.0), (-22.0, 19.0), (32.0, 28.0), (-32.0, 28.0), (0.0, 30.0)]
+    offsets = below + above if ay > b.mid else above + below
+
+    candidates: list[tuple[float, float, int]] = []
+    for idx, (dx, dy) in enumerate(offsets):
+        cx = _clamp_cx(ax + dx, half_w, x0, x_end)
+        cy = min(max(b.mid + dy, min_cy), max_cy)
+        candidates.append((cx, cy, idx))
+
+    def _score(cand: tuple[float, float, int]) -> tuple[int, int, int]:
+        cx, cy, idx = cand
+        hits = _collides(cx, cy + 2.0, half_w, half_h, obstacles)
+        on_row = 1 if (b.hi - 5.0 < cy + 2.0 < b.lo + 5.0) else 0
+        return (hits, on_row, idx)
+
+    cx, cy, _ = min(candidates, key=_score)
+    best_hits = _collides(cx, cy + 2.0, half_w, half_h, obstacles)
+    if best_hits > 0 and stats is not None:
+        stats.crowded_notes.append(
+            {
+                "target": f"{n.row.name}@{format_time(n.time, timescale)}",
+                "label": n.label,
+                "overlaps": best_hits,
+            }
+        )
+    note_labels.append((cx, cy + 2.0, half_w, half_h))
+
+    if isinstance(n.row, Signal) and n.row.kind == "bus" and ay == b.mid:
+        before = n.row.value_before(n.time)
+        after = n.row.value_at(n.time)
+        if not (n.time > 0 and (type(before) is not type(after) or before != after)):
+            ay = b.hi if cy < b.mid else b.lo
+
+    cv.line(ax, ay, cx, cy + 2.0, col, width=1.2, opacity=0.85, cap="round")
+    cv.add(f'<circle cx="{fmt(ax)}" cy="{fmt(ay)}" r="4.5" fill="{col}" fill-opacity="0.2"/>')
+    cv.add(f'<circle cx="{fmt(ax)}" cy="{fmt(ay)}" r="2.2" fill="{col}"/>')
+    cv.text(
+        cx,
+        cy + 3.8,
+        n.label,
+        col,
+        size=10.5,
+        anchor="middle",
+        weight="500",
+        bg=True,
+        bg_fill=c["badge_bg"],
+        bg_stroke=col,
+    )
