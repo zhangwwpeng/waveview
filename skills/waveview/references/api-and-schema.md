@@ -20,6 +20,7 @@ d = Diagram(
 
 - `d.clock(name, freq=None, period=None, phase=0, duty=0.5, label=None, idle=0, start=None, stop=None, gated=False, tco=0) -> Clock`
   - Specify **exactly one** of `freq` (e.g. `"100MHz"`) or `period` (e.g. `"10ns"`).
+  - **`phase=0` first-edge rule**: `phase` sets the timestamp of the first active rising edge in `[0, period)`. Default `phase=0` puts rising edges at **`0, period, 2*period, ...`** (`0ns, 10ns, 20ns...` for `100MHz`) and falling edges at `duty*period, ...` (`5ns, 15ns, 25ns...`). Before any wait/set call, the cursor is uninitialized (`None`), so the first `d.posedge(clk)` lands at `t=0ns (#1)` — call a bare `d.posedge(clk)` first when `[0, period)` should remain idle before `#2`.
   - `tco`: default register clock-to-output propagation delay applied after `d.posedge(clk)` / `d.negedge(clk)` (`0 <= tco < period`). Can be overridden per wait via `d.posedge(clk, tco="0ns")`.
   - Gated clock options:
     - Set `idle=0` or `idle=1`, and pass `start=`/`stop=` or `gated=True` with `clk.enable(at=None)` / `clk.disable(at=None)` (default `at` = `d.now`).
@@ -51,7 +52,7 @@ Event handles & non-mutating `Point` / `TimeRef` anchors (**no hardcoded `"30ns"
 - `d.region(row: Row | str, start: TimeRef, end: TimeRef, label: str | None = None)`
 - `d.marker(at: TimeRef | None = None, label: str | None = None)` (`at=None` uses `d.now`)
 - `d.measure(start: TimeRef, end: TimeRef, label: str | None = None)`
-- `d.note(target: Point, label: str)` or `d.note(row: Row | str, at: TimeRef, label: str)` — single-point callout dot + leader line + pill badge (for concise on-wave notes without full-height marker lines)
+- `d.note(target: Point, label: str)` or `d.note(row: Row | str, at: TimeRef, label: str)` — single-point callout dot + leader line + pill badge (for concise on-wave notes without full-height marker lines). **Handshake rule:** avoid `d.note(e_hs.valid, ...)` if `valid` drops `1→0` at `e_hs` (dot lands on falling edge); anchor on `d.note(clk, e_hs, ...)` or steady `d.note(ready, e_hs, ...)` or use `d.marker(e_hs, ...)`.
 - `d.caption(*texts: str)` — explanatory footer note line(s) rendered below the bottom time axis (multiline strings split on `\n`; automatically expands SVG canvas height/width)
 - `d.describe() -> str` — chronological action playback (`old->new`).
 - `d.check() -> None` — emits `WaveWarning` if content exceeds `end` or any signal remains un-driven with `init="x"`.
@@ -77,6 +78,12 @@ Event handles & non-mutating `Point` / `TimeRef` anchors (**no hardcoded `"30ns"
   - `sampled`: signal value strictly before the edge (`value_before(t)`).
   - `after`: signal value at the edge (`value_at(t)`).
   - `changed`: `True` when `sampled != after`.
+- `d.handshakes(clk, valid, ready, *, edge="rise", active=1, include_gaps=True) -> list[dict]`
+  - Returns `[{"edge": 4, "time": "30ns", "time_s": 3e-8}, ...]` for all active edges where both `valid` and `ready` are sampled at `active`.
+- `d.expect_handshake(clk, valid, ready, *, at=None, count=None, edge="rise", active=1) -> list[dict]`
+  - Declarative protocol assertion: raises `WaveError` (showing exact sampled values, 1-cycle-shift hint, and actual handshake edges) if `at` is not a true handshake edge or total count differs from `count`. Adjusts automatically when `at` includes `clk.tco`.
+- `d.expect_stable(sig, start, end, *, no_x=True) -> Value`
+  - Asserts `sig` stays unchanged (and non-`x`/`z` when `no_x=True`) over `[start, end)`. Raises `WaveError` on glitches or unknowns.
 - `d.to_dict() -> dict` — full schema documented below.
 - `d.inspect(fmt="text") -> str` — `"text"` (AI checklist + `describe()` + `@posedge` sample tables) or `"json"`.
 
@@ -261,7 +268,7 @@ d.delay("20ns")(cs_n=1, mosi=0)
 
 ### AXI4 Multi-Channel Write Burst (AW + W 2-beat + B)
 
-Notice the RTL sampling rule: **assignments at `posedge k` settle after edge `k` and are sampled (`sampled`) at `posedge k+1`**. When `READY` already holds `1` on the handshake edge (so `READY` has no assignment in `e_hs`), pass `(awready, e_aw_hs)` or `d.point(awready, e_aw_hs)` instead of `e_aw_hs.awready`.
+Notice the RTL sampling rule: **assignments at `posedge k` settle after edge `k` and are sampled (`sampled`) at `posedge k+1`**. When `READY` already holds `1` on the handshake edge (so `READY` has no assignment in `e_hs`), pass `(awready, e_aw_hs)` or `d.point(awready, e_aw_hs)` instead of `e_aw_hs.awready`. Anchor handshake callouts on `clk` (`d.note(clk, e_aw_hs, ...)`) or steady `ready`, never on the falling `valid` edge.
 
 ```python
 from waveview import Diagram
@@ -295,13 +302,59 @@ e_b = d.posedge(clk)(bvalid=1, bresp="OKAY")
 e_b_hs = d.posedge(clk)(bvalid=0, bresp="x")
 d.posedge(clk)(awready=0, bready=0)
 
+d.expect_handshake(clk, awvalid, awready, at=e_aw_hs, count=1)
+d.expect_handshake(clk, wvalid, wready, count=2)
+d.expect_handshake(clk, bvalid, bready, at=e_b_hs, count=1)
+d.expect_stable(wdata, e_w0, e_w0_hs)
+
 d.arrow(e_aw.awvalid, (awready, e_aw_hs), "AW hs")
 d.arrow(e_w1_hs.wlast, e_b.bvalid, "Wlast -> B")
 d.arrow(e_b.bvalid, (bready, e_b_hs), "B hs")
 d.region(wdata, e_w0, e_w1_hs, "W 2-beat")
-d.note(e_aw_hs.awvalid, "sampled both=1")
+d.note(clk, e_aw_hs, "AW @#4")
 d.caption(
-    "Note 1: Assignments on edge k take effect after edge k and are sampled on edge k+1.",
-    "Note 2: (awready, e_aw_hs) and (bready, e_b_hs) anchor arrows on edges where READY stays constant.",
+    "Note 1: Rising edges sit at 0/10/20ns...; assignments on edge k are sampled on edge k+1.",
+    "Note 2: (awready, e_aw_hs) and d.note(clk, e_aw_hs, ...) avoid anchoring on falling valid edges.",
+)
+```
+
+### AXI4-Lite Read Transaction (AR + R)
+
+```python
+from waveview import Diagram
+
+d = Diagram("AXI4-Lite Read (AR + R)", theme="bamboo")
+clk = d.clock("aclk", freq="100MHz")
+
+with d.group("AR"):
+    arvalid = d.wire("arvalid", init=0, label="ARVALID")
+    arready = d.wire("arready", init=0, label="ARREADY")
+    araddr = d.bus("araddr", init="x", width=32, pad=False, label="ARADDR[31:0]")
+
+with d.group("R"):
+    rvalid = d.wire("rvalid", init=0, label="RVALID")
+    rready = d.wire("rready", init=0, label="RREADY")
+    rdata = d.bus("rdata", init="x", width=32, pad=False, label="RDATA[31:0]")
+    rresp = d.bus("rresp", init="x", label="RRESP")
+
+d.posedge(clk)
+e_ar = d.posedge(clk)(arvalid=1, araddr=0x500, rready=1)
+d.posedge(clk)(arready=1)
+e_ar_hs = d.posedge(clk)(arvalid=0, araddr="x")
+e_r = d.posedge(clk)(rvalid=1, rdata=0xCAFE1234, rresp="OKAY")
+e_r_hs = d.posedge(clk)(rvalid=0, rdata="x", rresp="x")
+d.posedge(clk)(arready=0, rready=0)
+
+d.expect_handshake(clk, arvalid, arready, at=e_ar_hs, count=1)
+d.expect_handshake(clk, rvalid, rready, at=e_r_hs, count=1)
+d.expect_stable(araddr, e_ar, e_ar_hs)
+
+d.arrow(e_ar.arvalid, (arready, e_ar_hs), "AR hs")
+d.arrow((arready, e_ar_hs), e_r.rvalid, "1-cyc lat")
+d.arrow(e_r.rvalid, (rready, e_r_hs), "R hs")
+d.note(clk, e_ar_hs, "AR @#4")
+d.note(clk, e_r_hs, "R @#6")
+d.caption(
+    "Note: First rising edge at 0ns; pad=False renders 32-bit 0x500 concisely without leading zeros.",
 )
 ```

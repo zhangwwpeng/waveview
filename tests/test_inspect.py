@@ -415,3 +415,51 @@ def test_crowded_regions_detection_and_cli_strict(
     monkeypatch.setattr("sys.stdin", io.StringIO(script))
     assert cli_main(["check", "-", "--strict"]) == 2
     assert "区域拥挤：" in capsys.readouterr().out
+
+
+def test_handshakes_expect_handshake_and_expect_stable():
+    d = Diagram("Protocol Assertions")
+    clk = d.clock("clk", period="10ns")
+    valid = d.wire("valid", init=0)
+    ready = d.wire("ready", init=0)
+    wdata = d.bus("wdata", init="x", width=32, pad=False)
+
+    d.posedge(clk)                                   # #1 0ns
+    e_drive = d.posedge(clk)(valid=1, wdata=0x270F)  # #2 10ns
+    e_early = d.posedge(clk)(ready=1)                # #3 20ns (sampled valid=1, ready=0)
+    e_hs1 = d.posedge(clk)(wdata=0x2710)             # #4 30ns (sampled valid=1, ready=1 -> hs #1)
+    e_hs2 = d.posedge(clk)(valid=0, ready=0, wdata="x")  # #5 40ns (sampled valid=1, ready=1 -> hs #2)
+
+    hs = d.handshakes(clk, valid, ready)
+    assert [(h["edge"], h["time"]) for h in hs] == [(4, "30ns"), (5, "40ns")]
+    assert d.expect_handshake(clk, valid, "ready", at=e_hs1, count=2) == hs
+    assert d.expect_handshake("clk", "valid", ready, at=e_hs2) == hs
+
+    # Off-by-one beat fails with helpful sampled + "在该沿才刚变为" + actual beats hints.
+    with pytest.raises(WaveError, match=r"在该沿才刚变为.*实际发生握手的边沿.*#4\(30ns\)"):
+        d.expect_handshake(clk, valid, ready, at=e_early)
+
+    with pytest.raises(WaveError, match="期望.*发生 1 次握手，实际发生 2 次"):
+        d.expect_handshake(clk, valid, ready, count=1)
+
+    with pytest.raises(WaveError, match="有效上升沿"):
+        d.expect_handshake(clk, valid, ready, at="25ns")
+
+    # expect_stable allows change right at window end (40ns), rejects change strictly inside [10ns, 40ns).
+    assert d.expect_stable(wdata, e_drive, e_hs1) == 0x270F
+    with pytest.raises(WaveError, match="发生了跳变：30ns 处 0x270F→0x2710"):
+        d.expect_stable(wdata, e_drive, e_hs2)
+    with pytest.raises(WaveError, match='为 "x"'):
+        d.expect_stable(wdata, "0ns", e_drive)
+
+    # Also verify tco-shifted event handle still resolves cleanly back to its driving clock edge.
+    d_tco = Diagram("TCO Assertions")
+    c_tco = d_tco.clock("clk", period="10ns", tco="1.5ns")
+    v_tco = d_tco.wire("valid", init=0)
+    r_tco = d_tco.wire("ready", init=1)
+    d_tco.posedge(c_tco)                 # #1 1.5ns
+    d_tco.posedge(c_tco)(valid=1)        # #2 11.5ns
+    e_hs_tco = d_tco.posedge(c_tco)(valid=0)  # #3 21.5ns (clock edge @20ns)
+    assert d_tco.expect_handshake(c_tco, v_tco, r_tco, at=e_hs_tco, count=1) == [
+        {"edge": 3, "time": "20ns", "time_s": 2e-08}
+    ]

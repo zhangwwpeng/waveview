@@ -55,7 +55,7 @@ In TUI replies, `extensions/waveview.ts` replaces the entire ```` ```python_wave
   - Make the waveform figure self-contained so the user can understand the timing just by looking at the diagram.
   - Do **NOT** repeat or dump cycle-by-cycle timing narration separately in the chat reply prose (e.g., "at 10ns `valid` rises, at 20ns `ready` asserts...") whenever that timing can be shown inside the diagram using library annotations—keep surrounding reply text minimal.
 - Choose the matching library method for each kind of explanation:
-  - `d.note(e.ready, "短标注")`, `d.note(clk.posedge(3), "采样沿")`, or `d.note(ready, e_hs, "握手沿")`: single-point callout badge + leader line attached to a waveform point (no full-height vertical line).
+  - `d.note(clk, e_hs, "握手")`, `d.note(clk.posedge(3), "采样沿")`, or `d.note(ready, e_hs, "握手沿")`: single-point callout badge + leader line attached to a waveform point (no full-height vertical line). **Warning:** never attach a handshake `note` to a `valid` point that drops `1→0` on that exact edge (`d.note(e_hs.valid, ...)` puts the dot on the falling edge and misleads readers); anchor it on the clock edge (`d.note(clk, e_hs, ...)`), on the steady-high partner (`d.note(ready, e_hs, ...)`), or use `d.marker(e_hs, ...)`.
   - `d.arrow(...)`, `d.region(...)`, `d.marker(...)`, `d.measure(...)`: causality arrows accept `Point` (`e1.a`, `clk.posedge(n)`, `sig.at(e2)`) **or `(row, TimeRef)` tuples** such as `d.arrow(e1.valid, (ready, e3), "握手")` when `ready` didn't toggle on that edge; phase/window highlights, global vertical markers, and timing intervals.
   - `d.caption("Note 1: ...", "Note 2: ...")`: left-aligned multi-line explanatory footer below the time axis for protocol rules, preconditions, and longer remarks.
 
@@ -75,7 +75,10 @@ waveview render examples/apb.py -o out/apb.svg       # 显式导出 .svg（-o - 
 ### Python Inspection API
 
 ```python
-samples = d.sample("clk", edge="rise")  # [{"edge": 0, "time": "5ns", "time_s": 5e-9, "signals": {name: {"sampled": ..., "after": ..., "changed": bool}}}, ...]
+samples = d.sample("clk", edge="rise")  # [{"edge": 1, "time": "0ns", "time_s": 0.0, "signals": {name: {"sampled": ..., "after": ..., "changed": bool}}}, ...]
+hs = d.handshakes("clk", valid, ready)  # [{"edge": 4, "time": "30ns", "time_s": 3e-8}, ...]
+d.expect_handshake("clk", valid, ready, at=e_hs, count=1)  # Fails loudly with hint if beat is off by 1 cycle
+d.expect_stable(wdata, e_start, e_hs, no_x=True)           # Asserts payload held steady and non-x/z over [start, end)
 data = d.to_dict()                      # Full structured dict: ok, svg_valid, canvas, warnings, layout_issues, clock_samples, steps, ...
 report = d.inspect(fmt="text")          # fmt="text" or fmt="json"
 script = d.describe()                   # Strict time-ordered text playback (old->new)
@@ -88,6 +91,7 @@ How to interpret `sampled` vs `after` in `d.sample()`:
 
 ## Core DSL Rules & Common Pitfalls
 
+- **Clock first-edge & `phase=0` semantics**: `d.clock(freq="100MHz")` (`period="10ns"`, default `phase=0`, `duty=0.5`) places rising edges at **`0ns (#1), 10ns (#2), 20ns (#3), ...`** (NOT `5 / 15 / 25ns`), and falling edges at `5ns, 15ns, 25ns, ...`. Before any wait/set call, `d.now` is uninitialized (`None`), so the **first `d.posedge(clk)` lands on `#1` at `t=0ns`** (when `phase=0`). Call a bare `d.posedge(clk)` first if `[0, period)` should show idle initial values before driving inputs on `#2`.
 - **Exact signal names**: `d.wire("valid")` means assignments must use `valid=...` (never `v=...`).
 - **Event handle scoping & handshake anchors**: `e = d.posedge(clk)(valid=1)` only exposes signals assigned in that event; accessing `e.ready` raises `WaveError`. When annotating a signal that stays constant on that beat (e.g. a ready/valid handshake), pass `(ready, e3)` directly to `d.arrow(e1.valid, (ready, e3), "握手")`, or pass `e3` as `TimeRef` to `d.note(ready, e3, ...)` / `d.point(ready, e3)` / `ready.at(e3)` instead of hardcoding timestamps. If using `warn_noop=False`, same-value assignments are omitted from `describe()`/`steps` noise while `e.ready` remains valid.
 - **Call wait helpers to assign**: `d.posedge(clk)` / `d.delay(...)` / `d.at(...)` return a `Wait` handle — either call it immediately `e = d.posedge(clk)(valid=1)` or follow with `d.set(valid=1)`. Note that any `Event`, `Point`, `Wait`, `Instant`, or `clk.posedge(n)` works directly as `TimeRef` across `arrow`/`note`/`region`/`marker`/`measure`/`point`/`sig.at`. Use `d.clock(..., tco="1.5ns")` (or `d.posedge(clk, tco="1.5ns")`) when showing realistic register clock-to-output propagation delay.

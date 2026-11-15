@@ -64,7 +64,7 @@ uv tool install git+https://github.com/zhangwwpeng/waveview
 若使用 `omp` TUI 内联渲染波形图，安装插件并在 `~/.omp/agent/config.yml` 开启 `extensionRenderers.assistantText: true`：
 
 ```bash
-# 从 GitHub 直接安装（或本地仓库根目录执行 omp plugin link .）
+# 从 GitHub 直接安装（或本地仓库根目录执行 omp plugin link . 并定期 omp update 同步内置 skill）
 omp install github:zhangwwpeng/waveview
 ```
 
@@ -87,7 +87,7 @@ EOF
 waveview render examples/apb.py -o out/apb.svg
 ```
 
-- **Python 编程核对**：任意 `Diagram` 支持 `d.sample("clk")`（返回每个有效边沿的 `sampled`→`after` 寄存器采样变化）、`d.to_dict()` 和 `d.inspect("text" | "json")`。
+- **Python 编程核对**：任意 `Diagram` 支持 `d.sample("clk")`（返回每个有效边沿的 `sampled`→`after` 寄存器采样变化）、`d.handshakes(...)` / `d.expect_handshake(...)` / `d.expect_stable(...)` 协议断言、`d.to_dict()` 和 `d.inspect("text" | "json")`。
 - **内置 Skill**：见 [skills/waveview/SKILL.md](skills/waveview/SKILL.md)。
 - **omp TUI 渲染插件**：见 [extensions/waveview.ts](extensions/waveview.ts)（通过 `omp install github:zhangwwpeng/waveview` 或本机 `omp plugin link .` 安装，将回复中的 `python_wave` 代码块内联渲染为 SVG）。
 

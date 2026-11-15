@@ -410,6 +410,15 @@ class Diagram:
             msg += f"。已声明的信号：{'、'.join(signals) or '（无）'}"
         raise WaveError(msg)
 
+    def _signal_ref(self, sig: Signal | str) -> Signal:
+        if isinstance(sig, str):
+            return self._signal(sig)
+        if isinstance(sig, Signal):
+            if not any(r is sig for r in self.rows):
+                raise WaveError(f'信号 "{sig.name}" 不属于当前图表')
+            return sig
+        raise WaveError(f"需要一个信号（d.wire/d.bus 的返回值或信号名），收到的是 {sig!r}")
+
     def _normalise(self, sig: Signal, value: Value) -> Value:
         if isinstance(value, str) and value.strip().lower() in ("x", "z"):
             return value.strip().lower()
@@ -651,6 +660,67 @@ class Diagram:
         from .inspect import sample_clock
 
         return sample_clock(self, clk, edge, include_gaps=include_gaps)
+
+    def handshakes(
+        self,
+        clk: Clock | str,
+        valid: Signal | str,
+        ready: Signal | str,
+        *,
+        edge: Literal["rise", "fall"] = "rise",
+        active: Value = 1,
+        include_gaps: bool = True,
+    ) -> list[dict[str, Any]]:
+        """Return active clock edges where both ``valid`` and ``ready`` are sampled at ``active``."""
+        from .inspect import find_handshakes
+
+        return find_handshakes(
+            self,
+            clk,
+            valid,
+            ready,
+            edge=edge,
+            active=active,
+            include_gaps=include_gaps,
+        )
+
+    def expect_handshake(
+        self,
+        clk: Clock | str,
+        valid: Signal | str,
+        ready: Signal | str,
+        *,
+        at: TimeRef | None = None,
+        count: int | None = None,
+        edge: Literal["rise", "fall"] = "rise",
+        active: Value = 1,
+    ) -> list[dict[str, Any]]:
+        """Verify valid/ready handshake occurrence at ``at`` and/or total ``count``."""
+        from .inspect import expect_handshake
+
+        return expect_handshake(
+            self,
+            clk,
+            valid,
+            ready,
+            at=at,
+            count=count,
+            edge=edge,
+            active=active,
+        )
+
+    def expect_stable(
+        self,
+        sig: Signal | str,
+        start: TimeRef,
+        end: TimeRef,
+        *,
+        no_x: bool = True,
+    ) -> Value:
+        """Verify ``sig`` stays constant (and optionally non-x/z) over ``[start, end)``."""
+        from .inspect import expect_stable
+
+        return expect_stable(self, sig, start, end, no_x=no_x)
 
     def to_dict(self) -> dict[str, Any]:
         """Return structured timing semantics, SVG diagnostics, and clock samples."""

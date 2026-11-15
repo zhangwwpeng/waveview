@@ -128,6 +128,7 @@ clk = d.clock(
 ```
 
 - `freq` 与 `period` **必须二选一**，不能同时写或都不写。
+- **`phase=0` 首沿规则（必读）**：`phase`（默认 `0`）指定周期 `[0, period)` 内**首个上升沿**的时刻。因此 `d.clock("clk", freq="100MHz")`（`period="10ns"`）的上升沿落在 **`0ns (#1)、10ns (#2)、20ns (#3)…`**，下降沿落在 `5ns、15ns、25ns…`（并非 `5 / 15 / 25ns` 上升）。在任何等待之前，游标尚未初始化（`None`），**第一次 `d.posedge(clk)` 会直接落在 `t = 0ns`（`#1`）**；若希望 `0~10ns` 先展示初始空闲电平再于 `#2 (10ns)` 发起传输，请先空调用一次 `d.posedge(clk)`。
 - `duty` 必须在 `(0, 1)` 开区间内（不含 `0` 和 `1`）。
 - `tco` 可选，表示同步触发器相对时钟沿的默认输出传播延迟（`0 <= tco < period`）；调用 `d.posedge(clk, tco=...)` 或 `d.negedge(clk, tco=...)` 也可针对单次等待覆盖该延迟。
 - 图中声明的**第一个时钟**会在波形区背景生成竖向浅色参考网格（在其激活的上升沿位置，前提是周期宽度 `>= 10px`）。
@@ -244,7 +245,7 @@ with d.group("主机接口"):
    - 同一根信号前后两点之间的 `arrow` 会自动画出上拱弧线。
 
 2. **单点气泡注释 `d.note(target, ...)`**
-   - 两种调用方式：直接传点句柄（如 `d.note(e.ready, "从机就绪")` 或 `d.note(clk.posedge(3), "采样沿")`），或传信号/时钟与时刻 `d.note(clk, "20ns", "采样沿")`（不画贯穿全图的竖线）。
+   - 两种调用方式：直接传点句柄（如 `d.note(clk, e_hs, "握手")` 或 `d.note(clk.posedge(3), "采样沿")`），或传信号/时钟与时刻 `d.note(clk, "20ns", "采样沿")`（不画贯穿全图的竖线）。**注意**：若在握手同一拍把 `valid` 拉低（`1→0`），`d.note(e_hs.valid, ...)` 会钉在下降沿造成视觉歧义，此时请钉在时钟 `d.note(clk, e_hs, ...)`、保持常高的 `d.note(ready, e_hs, ...)`，或改用 `d.marker(e_hs, ...)`。
    - 在锚点位置画出圆点、引线与圆角标签徽章，并自动避让总线文字、区域标题、标记、因果箭头及其他注释；仍存在重叠时会在 `waveview check` 的 `crowded_notes` 中报警。
 
 3. **区间高亮 `d.region(row, start, end, label=None)`**
@@ -313,6 +314,7 @@ png_bytes = d.to_png(scale=2)          # 获取 PNG 二进制字节流
   1. 有事件或标注超出了手动设置的 `end`；
   2. 某信号从未被赋值过且初值为 `"x"`（整行全是未知阴影）。
 - **`d.sample(clk, edge="rise", *, include_gaps=False)`**：按时钟有效边沿逐拍采样全部信号，返回 `[{"edge": 1, "time": "5ns", "time_s": 5e-9, "signals": {name: {"sampled": ..., "after": ..., "changed": bool}}}, ...]`，其中 `sampled` 为边沿到达前一瞬间的值（触发器采样值），`after` 为边沿后的更新值。
+- **`d.handshakes(clk, valid, ready, *, edge="rise", active=1)` / `d.expect_handshake(...)` / `d.expect_stable(...)`**：声明式协议核对原语——自动按 `sampled` 语义找出或断言所有 `valid && ready` 握手拍（写偏一拍会指出当前拍实际采样值、刚变化需下拍采样的提示及真实握手边沿），以及检查等待窗口内载荷保持稳定且无 `x`/`z`。
 - **`d.to_dict()` / `d.inspect(fmt="text" | "json")`**：一次输出 `ok`、`svg_valid`、画布尺寸与布局诊断（`truncated_labels` / `dropped_labels` / `crowded_arrows` / `crowded_notes` / `crowded_regions`）、`warnings`、`layout_issues`、`steps` 及各时钟 `clock_samples`，让 AI 无需生成或读取 PNG 图片即可完成版式与时序双重验证。
 
 ### 8.4 CLI 命令与 Skill 封装

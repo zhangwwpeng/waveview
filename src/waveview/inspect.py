@@ -9,12 +9,12 @@ from fractions import Fraction
 from typing import TYPE_CHECKING, Any, Literal
 
 from .errors import WaveError, WaveWarning
-from .model import Arrow, Clock, EdgeKind, Marker, Measure, Note, Region, Signal
+from .model import Arrow, Clock, EdgeKind, Marker, Measure, Note, Region, Signal, Value
 from .svg import TimeMap, _merge_gaps, render_with_stats
 from .units import format_freq, format_time
 
 if TYPE_CHECKING:
-    from .diagram import Diagram
+    from .diagram import Diagram, TimeRef
 
 
 def _edge_index(clk: Clock, kind: EdgeKind, t: Fraction) -> int:
@@ -83,6 +83,145 @@ def sample_clock(
                 }
             )
     return samples
+
+
+def find_handshakes(
+    d: Diagram,
+    clk: Clock | str,
+    valid: Signal | str,
+    ready: Signal | str,
+    *,
+    edge: EdgeKind = "rise",
+    active: Value = 1,
+    include_gaps: bool = True,
+) -> list[dict[str, Any]]:
+    """Return clock edges where both ``valid`` and ``ready`` sample equal to ``active``."""
+    clock = d._clock(clk)
+    v_sig = d._signal_ref(valid)
+    r_sig = d._signal_ref(ready)
+    v_target = v_sig.display(d._normalise(v_sig, active))
+    r_target = r_sig.display(d._normalise(r_sig, active))
+    rows = sample_clock(d, clock, edge=edge, include_gaps=include_gaps)
+    return [
+        {"edge": row["edge"], "time": row["time"], "time_s": row["time_s"]}
+        for row in rows
+        if row["signals"][v_sig.name]["sampled"] == v_target
+        and row["signals"][r_sig.name]["sampled"] == r_target
+    ]
+
+
+def expect_handshake(
+    d: Diagram,
+    clk: Clock | str,
+    valid: Signal | str,
+    ready: Signal | str,
+    *,
+    at: TimeRef | None = None,
+    count: int | None = None,
+    edge: EdgeKind = "rise",
+    active: Value = 1,
+) -> list[dict[str, Any]]:
+    """Assert valid/ready handshake at ``at`` and/or exact ``count``, raising ``WaveError`` on mismatch."""
+    clock = d._clock(clk)
+    v_sig = d._signal_ref(valid)
+    r_sig = d._signal_ref(ready)
+    if edge not in ("rise", "fall"):
+        raise WaveError(f'edge 只能是 "rise" 或 "fall"，收到的是 {edge!r}')
+    v_val = d._normalise(v_sig, active)
+    r_val = d._normalise(r_sig, active)
+    if count is not None and (isinstance(count, bool) or not isinstance(count, int) or count < 0):
+        raise WaveError(f"count 必须是非负整数，收到的是 {count!r}")
+
+    actual = find_handshakes(d, clock, v_sig, r_sig, edge=edge, active=active, include_gaps=True)
+
+    if at is not None:
+        raw_t = d._resolve(at)
+        if raw_t < 0:
+            raise WaveError(f"expect_handshake 的 at 时间不能是负数，收到的是 {at!r}")
+        if clock._edge_kind_at(raw_t) == edge:
+            edge_t = raw_t
+        elif clock.tco > 0 and raw_t - clock.tco >= 0 and clock._edge_kind_at(raw_t - clock.tco) == edge:
+            edge_t = raw_t - clock.tco
+        else:
+            label = "上升" if edge == "rise" else "下降"
+            raise WaveError(f'{format_time(raw_t, d.timescale)} 不是时钟 "{clock.name}" 的有效{label}沿')
+
+        v_before = v_sig.value_before(edge_t)
+        r_before = r_sig.value_before(edge_t)
+        v_ok = type(v_before) is type(v_val) and v_before == v_val
+        r_ok = type(r_before) is type(r_val) and r_before == r_val
+        if not (v_ok and r_ok):
+            idx = _edge_index(clock, edge, edge_t)
+            sym = "↑" if edge == "rise" else "↓"
+            t_str = format_time(edge_t, d.timescale)
+            v_after = v_sig.value_at(edge_t)
+            r_after = r_sig.value_at(edge_t)
+            hints: list[str] = []
+            if not v_ok and type(v_after) is type(v_val) and v_after == v_val:
+                hints.append(f'"{v_sig.name}" 在该沿才刚变为 {v_sig.display(v_after)}，要到下一拍才会被采样')
+            if not r_ok and type(r_after) is type(r_val) and r_after == r_val:
+                hints.append(f'"{r_sig.name}" 在该沿才刚变为 {r_sig.display(r_after)}，要到下一拍才会被采样')
+            hint_part = f"（{'；'.join(hints)}）" if hints else ""
+            if actual:
+                beats = ", ".join(f'#{h["edge"]}({h["time"]})' for h in actual)
+                actual_part = f"实际发生握手的边沿：{beats}"
+            else:
+                actual_part = f'整张图中 "{v_sig.name}" 与 "{r_sig.name}" 从未同拍完成握手'
+            raise WaveError(
+                f"在 {clock.name}{sym}#{idx} ({t_str}) 未发生握手："
+                f"采样到 {v_sig.name}={v_sig.display(v_before)}, {r_sig.name}={r_sig.display(r_before)}"
+                f"{hint_part}；{actual_part}"
+            )
+
+    if count is not None:
+        if len(actual) != count:
+            beats = ", ".join(f'#{h["edge"]}({h["time"]})' for h in actual) if actual else "无"
+            raise WaveError(
+                f'期望 "{v_sig.name}"/"{r_sig.name}" 在 {clock.name} 上发生 {count} 次握手，'
+                f"实际发生 {len(actual)} 次（{beats}）"
+            )
+    elif at is None and not actual:
+        raise WaveError(f'整张图中 "{v_sig.name}" 与 "{r_sig.name}" 从未在 {clock.name} 边沿发生握手')
+
+    return actual
+
+
+def expect_stable(
+    d: Diagram,
+    sig: Signal | str,
+    start: TimeRef,
+    end: TimeRef,
+    *,
+    no_x: bool = True,
+) -> Value:
+    """Assert ``sig`` stays constant (and non-x/z when ``no_x=True``) throughout ``[start, end)``."""
+    s = d._signal_ref(sig)
+    t0 = d._resolve(start)
+    t1 = d._resolve(end)
+    if t0 < 0:
+        raise WaveError(f"expect_stable 的开始时间不能是负数，收到的是 {start!r}")
+    if t1 <= t0:
+        raise WaveError("expect_stable 的结束时间必须晚于开始时间")
+
+    ts = d.timescale
+    initial = s.value_at(t0)
+    if no_x and initial in ("x", "z"):
+        raise WaveError(f'信号 "{s.name}" 在稳定窗口起点 {format_time(t0, ts)} 为 "{initial}"（要求非 x/z）')
+
+    for c in s.changes:
+        if t0 < c.time < t1:
+            if no_x and c.value in ("x", "z"):
+                raise WaveError(
+                    f'信号 "{s.name}" 在稳定窗口 [{format_time(t0, ts)}, {format_time(t1, ts)}) 内'
+                    f'于 {format_time(c.time, ts)} 变为 "{c.value}"（要求非 x/z）'
+                )
+            if type(c.value) is not type(initial) or c.value != initial:
+                raise WaveError(
+                    f'信号 "{s.name}" 在稳定窗口 [{format_time(t0, ts)}, {format_time(t1, ts)}) 内发生了跳变：'
+                    f"{format_time(c.time, ts)} 处 {s.display(initial)}→{s.display(c.value)}"
+                )
+
+    return initial
 
 
 def to_dict(

@@ -14,11 +14,17 @@
   "omp": {
     "extensions": [
       "./extensions/waveview.ts"
+    ],
+    "skills": [
+      "./skills"
     ]
   },
   "pi": {
     "extensions": [
       "./extensions/waveview.ts"
+    ],
+    "skills": [
+      "./skills"
     ]
   },
   "peerDependencies": {
