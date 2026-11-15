@@ -13,8 +13,11 @@ d = Diagram(
     px_per_ns: float | None = None,
     warn_noop: bool = True,
     max_width: float | None = 2400.0,  # None uncaps auto-widening for wide 32/64-bit buses
+    width: float | None = None,        # Target total SVG width (px); mutually exclusive with px_per_ns
 )
 ```
+
+- `width` vs `px_per_ns`: pass `width=900` for adaptive target-width layout while keeping the `5px/half` clock floor and bus-text non-truncation constraints (hard limits still win and report in `canvas.width_drivers`). Pass `px_per_ns` alone for explicit fixed scaling. Specifying both raises `WaveError`.
 
 ### Declarations & Groups
 
@@ -115,7 +118,9 @@ Event handles & non-mutating `Point` / `TimeRef` anchors (**no hardcoded `"30ns"
     "width": 959.4,
     "height": 652.0,
     "px_per_ns": 4.2188,
+    "target_width": null,
     "hit_width_cap": false,
+    "width_drivers": [],
     "truncated_labels": [],
     "dropped_labels": [],
     "crowded_arrows": [],
@@ -273,7 +278,7 @@ Notice the RTL sampling rule: **assignments at `posedge k` settle after edge `k`
 ```python
 from waveview import Diagram
 
-d = Diagram("AXI4 Write Burst (AW + W 2-beat + B)", theme="bamboo")
+d = Diagram("AXI4 Write Burst (AW + W 2-beat + B)", theme="bamboo", width=900)
 clk = d.clock("aclk", freq="100MHz")
 
 with d.group("AW"):

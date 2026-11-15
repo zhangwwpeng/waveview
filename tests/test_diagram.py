@@ -549,3 +549,8 @@ def test_bus_pad_and_diagram_max_width():
     for bad_max_width in (0, -100, float("nan"), float("inf"), True):
         with pytest.raises(WaveError, match="max_width"):
             Diagram(max_width=bad_max_width)  # type: ignore[arg-type]
+    for bad_width in (0, -100, float("nan"), float("inf"), True):
+        with pytest.raises(WaveError, match="width"):
+            Diagram(width=bad_width)  # type: ignore[arg-type]
+    with pytest.raises(WaveError, match="不能同时指定"):
+        Diagram(width=900, px_per_ns=8)

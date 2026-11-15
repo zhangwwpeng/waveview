@@ -17,6 +17,26 @@ if TYPE_CHECKING:
     from .diagram import Diagram, TimeRef
 
 
+def _format_width_driver(drv: dict[str, Any]) -> str:
+    kind = drv["kind"]
+    min_w = drv.get("min_width", 0)
+    if kind == "bus":
+        return f'{drv["signal"]}="{drv["value"]}" (需 ≥{min_w:g}px)'
+    if kind == "clock_floor":
+        return f"时钟最小周期宽度 (需 ≥{min_w:g}px)"
+    if kind == "label_rail":
+        return f"左侧标签栏与边距 (需 ≥{min_w:g}px)"
+    if kind == "caption":
+        return f"图注过长 (需 ≥{min_w:g}px)"
+    if kind == "title":
+        return f"标题过长 (需 ≥{min_w:g}px)"
+    if kind == "note":
+        return f'注释过长 {drv["row"]}="{drv["value"]}" (需 ≥{min_w:g}px)'
+    if kind == "marker":
+        return f'标记过长 "{drv["value"]}" (需 ≥{min_w:g}px)'
+    return f"{kind} (需 ≥{min_w:g}px)"
+
+
 def _edge_index(clk: Clock, kind: EdgeKind, t: Fraction) -> int:
     if not clk._gated:
         base = clk._base(kind)
@@ -267,8 +287,14 @@ def to_dict(
         )
     if stats.hit_width_cap and (stats.truncated_labels or stats.dropped_labels):
         cap_px = int(d.max_width) if d.max_width and d.max_width == int(d.max_width) else d.max_width
+        bus_drv = next((drv for drv in stats.width_drivers if drv["kind"] == "bus"), None)
+        driver_hint = (
+            f'（主要由 {bus_drv["signal"]}="{bus_drv["value"]}" 触发，至少需 {bus_drv["min_width"]:g}px）'
+            if bus_drv
+            else ""
+        )
         layout_issues.append(
-            f"画布已达 {cap_px}px 自动宽度上限；可传 Diagram(max_width=None) 放开自适应宽度、"
+            f"画布已达 {cap_px}px 自动宽度上限{driver_hint}；可传 Diagram(max_width=None) 放开自适应宽度、"
             "传 d.bus(..., pad=False) 省略前导零，或用 d.gap(...) 折叠长空闲"
         )
 
@@ -406,7 +432,9 @@ def to_dict(
             "width": stats.width,
             "height": stats.height,
             "px_per_ns": round(stats.px_per_ns, 4),
+            "target_width": stats.target_width,
             "hit_width_cap": stats.hit_width_cap,
+            "width_drivers": stats.width_drivers,
             "truncated_labels": stats.truncated_labels,
             "dropped_labels": stats.dropped_labels,
             "crowded_arrows": stats.crowded_arrows,
@@ -444,6 +472,9 @@ def inspect_diagram(
         f"[waveview check] {status} | {canvas['width']:g}x{canvas['height']:g}px | "
         f"theme={info['theme']} | end={info['end']} | svg={'valid' if info['svg_valid'] else 'INVALID'}"
     ]
+    if canvas["target_width"] is not None and canvas["width_drivers"]:
+        reasons = "、".join(_format_width_driver(drv) for drv in canvas["width_drivers"])
+        lines.append(f"宽度自适应：目标 {canvas['target_width']:g}px -> 实际 {canvas['width']:g}px（{reasons}）")
     if info["svg_error"]:
         lines.append(f"SVG 解析失败：{info['svg_error']}")
     if info["warnings"]:

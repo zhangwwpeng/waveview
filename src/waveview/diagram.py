@@ -129,6 +129,7 @@ class Diagram:
         px_per_ns: float | None = None,
         warn_noop: bool = True,
         max_width: float | None = 2400.0,
+        width: float | None = None,
     ):
         if timescale not in TIME_UNITS:
             raise WaveError(f'timescale "{timescale}" 不认识，可用：{", ".join(TIME_UNITS)}')
@@ -137,6 +138,12 @@ class Diagram:
             raise WaveError(f"theme 只能是 {names} 之一，收到的是 {theme!r}")
         if px_per_ns is not None:
             px_per_ns = _positive_finite(px_per_ns, "px_per_ns")
+        if width is not None:
+            width = _positive_finite(width, "width")
+        if px_per_ns is not None and width is not None:
+            raise WaveError(
+                "width 和 px_per_ns 不能同时指定：width 按目标画布总宽度自适应缩放，px_per_ns 强制固定每纳秒像素数"
+            )
         if max_width is not None:
             max_width = _positive_finite(max_width, "max_width")
         self.title = title
@@ -145,6 +152,7 @@ class Diagram:
         self.px_per_ns = px_per_ns
         self.warn_noop = warn_noop
         self.max_width: float | None = max_width
+        self.width: float | None = width
         self._end = None if end is None else self._time(end)
         if self._end is not None and self._end <= 0:
             raise WaveError(f"end 必须大于 0，收到的是 {end!r}")

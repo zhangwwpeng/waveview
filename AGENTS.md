@@ -13,6 +13,7 @@
 - 报错不会回到模型上下文（renderer 只改显示），本地验证是唯一闭环。用户贴的报错才算数。
 - 时钟 `phase=0` 首沿规则：`d.clock(freq="100MHz")` 首拍上升沿 `#1` 在 `t=0ns`（`0 / 10 / 20ns...`，非 `5 / 15 / 25ns`），且首个 `d.posedge(clk)` 直接落 `0ns`；标握手时刻时用 `d.note(clk, e_hs, ...)` / `d.note(ready, e_hs, ...)` / `d.marker(e_hs, ...)`，勿钉在同拍 `1→0` 撤销的 `valid` 下降沿上。
 - 信号名以声明为准：`d.wire("valid")` 之后只能写 `valid=`，不能写 `v=`。
+- 默认目标宽度优先用 `Diagram(..., width=900)`，保留时钟可读性与总线不截断硬约束；若仍被长总线/图注撑宽，看 `canvas.width_drivers` 定位具体信号或图注（勿将 `px_per_ns` 与 `width` 同时传入）。
 - 事件句柄只带该事件真正赋过值的信号：`e.we` 在没给 `we` 赋值的事件上会抛 `WaveError`；指向同拍保持不变的信号可用 `(row, e)` 二元组、`(row, clk.posedge(n))` 或 `d.point(row, e)`（`Event`/`Wait`/`Point` 均可直接作 `TimeRef`，无需硬编码时间）。
 
 ## 开发与 CLI

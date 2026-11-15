@@ -5,101 +5,61 @@ description: Use when drawing digital hardware timing diagrams in TUI responses 
 
 # waveview Skill
 
-Use `waveview` for two tightly connected workflows:
-1. **Drawing waveforms in TUI replies** using ```` ```python_wave ```` blocks (rendered inline by `extensions/waveview.ts`).
-2. **Self-checking and recognizing timing in Python/CLI** via `waveview check`, `d.sample()`, `d.to_dict()`, and `d.inspect()`—without generating or viewing PNG images.
+Use `waveview` for TUI waveform diagrams (```` ```python_wave ```` blocks rendered inline by `extensions/waveview.ts`) and headless layout/timing checks (`waveview check`)—without generating or viewing PNG images.
 
-## Workflow A: TUI 内联画图闭环（先验再发）
+## Quick API Cheat Sheet
 
-When illustrating hardware timing in chat:
+```python
+d = Diagram(title="...", theme="bamboo", width=900)  # theme: light|dark|bamboo; width targets total px (mutually exclusive with px_per_ns); max_width=2400.0 (None=uncapped); warn_noop=True
+clk = d.clock("clk", freq="100MHz", phase=0, duty=0.5, tco=0)  # or period="10ns"; gated=True, idle=0|1
+valid = d.wire("valid", init=0, label="VALID")                 # values: 0, 1, "x", "z"
+data = d.bus("data", init="x", width=32, fmt="hex", pad=False) # fmt: hex|dec|bin; pad=False omits leading 0s
+with d.group("Channel"): ...                                   # nested left-rail group brackets
 
-1. Write Python code inside a ```` ```python_wave ```` (or ```` ```waveview ````) fence.
-2. Assign the `Diagram` to `d` (or another variable—the `omp-waveview` TUI plugin automatically prints `d.to_svg()` or the last `Diagram` instance).
-   - **Do NOT** call `print(d.to_svg())` inside the block.
-   - **Do NOT** call `d.save(...)` unless the user explicitly asked to write an image file to disk.
-3. **Always verify before sending the reply.** The `omp-waveview` TUI renderer errors only rewrite the UI fence and do **not** feed back into your context. Run the global `waveview` CLI on stdin first (assumes `~/.local/bin/waveview` installed via `uv tool install`; inside an uninstalled repo checkout, prefix with `uv run`):
+e1 = d.posedge(clk, n=1)(valid=1, data=0x270F)  # also negedge/delay/at/gap + d.set(...)
+d.arrow(e1.valid, (ready, e2), "handshake")     # src/dst: Point, clk.posedge(n), sig.at(t), d.point(row, ref), or (row, TimeRef)
+d.region(data, e1, e2, "burst"); d.marker(e2, "hs"); d.measure(e1, e2, "latency")
+d.note(clk, e2, "hs beat"); d.caption("Note 1: ...", "Note 2: ...")  # self-contained text footer
+
+d.expect_handshake(clk, valid, ready, at=e2, count=1)  # asserts sampled valid==1 && ready==1 on edge
+d.expect_stable(data, e1, e2, no_x=True)               # asserts unchanged & non-x/z over [start, end)
+```
+
+## Core Timing & Semantics (Read Carefully)
+
+1. **`phase=0` first edge & cursor (`d.now`)**:
+   - `d.clock(freq="100MHz")` (`period="10ns"`, `phase=0`, `duty=0.5`) places rising edges at **`0ns (#1), 10ns (#2), 20ns (#3), ...`** (NOT `5 / 15 / 25ns`) and falling edges at `5ns, 15ns, ...`.
+   - `d.now` starts as `None` (before `t=0`), so the **first `d.posedge(clk)` lands on `#1` at `0ns`**. Call a bare `d.posedge(clk)` first if `[0, period)` should hold initial idle values before driving `#2`.
+2. **One RTL rule — `#k` assignment (`after`) vs `#(k+1)` capture (`sampled`)**:
+   - Every edge `t` in `d.sample(clk)` has **`sampled`** (`value_before(t)`: what flip-flops capture *just before* the edge) and **`after`** (`value_at(t)`: what synchronous assignments produce *at/after* the edge, shifted by `tco` if set); `changed` is `sampled != after`.
+   - Therefore, **`e = d.posedge(clk)(valid=1)` on edge `#k` updates `#k.after`, and is first seen in `sampled` on edge `#(k+1)`**. Handshakes occur at `e_hs` when both `valid` and `ready` are `1` in `#e_hs.sampled`—use `d.expect_handshake(...)` & `d.expect_stable(...)` when verifying protocol timing so off-by-one beats fail immediately.
+3. **Canvas width & `px_per_ns`**:
+   - Pass **`Diagram(..., width=900)`** when you want a generous target canvas width (~850–950px) in a single pass instead of guessing `px_per_ns`. Hard constraints (clock `5px/half` readability floor, bus value fit without truncation, long `caption`/`title`/`note`/`marker`) may still widen the diagram beyond `width`, in which case `canvas.width_drivers` tells you exactly which bus segment or annotation drove the width.
+   - Reserve `px_per_ns` for explicit zoom factors; `width` and `px_per_ns` are mutually exclusive (`WaveError`).
+4. **Event handles & anchors**:
+   - `e = d.posedge(clk)(valid=1)` only exposes signals assigned in *that* event (`e.ready` raises `WaveError`). Every `Event`, `Point`, `Wait`, `Instant`, or `clk.posedge(n)` works directly as `TimeRef` in `arrow`, `note`, `region`, `marker`, `measure`, `point`, and `(row, TimeRef)` tuples—never hardcode `"30ns"` when a handle exists.
+   - Use exact declared signal names (`d.wire("valid")` -> `valid=1`, never `v=1`), initialize signals in `init=` (never leave signals un-driven at default `"x"`), and note `d.posedge()`/`delay()`/`at()` return a `Wait` handle that must be called `(...)` to assign.
+
+## TUI Reply Workflow (`python_wave`) & Self-Check
+
+1. Write code inside ```` ```python_wave ```` assigning the diagram to `d` (or last `Diagram` variable). **Do NOT** call `print(d.to_svg())` or `d.save(...)` unless the user requested a file on disk.
+2. **Put all explanations inside the diagram**: `extensions/waveview.ts` replaces the entire fence with rendered SVG, so `#` comments are invisible. Use `d.note`, `d.caption`, `d.arrow`, `d.region`, `d.marker`, `d.measure` only—never fake rows or ASCII/SVG hacks, and avoid repeating edge-by-edge prose outside the diagram when the diagram already shows it.
+   - **Handshake `note` pitfall**: never anchor `d.note(e_hs.valid, ...)` if `valid` drops `1→0` at `e_hs` (dot lands on falling edge); anchor on `d.note(clk, e_hs, ...)` or steady `d.note(ready, e_hs, ...)`, or use `d.marker(e_hs, ...)`.
+3. **Verify via stdin before replying** (renderer errors do **not** return to your context; prefix `uv run` if not globally installed):
 
 ```bash
-waveview check - <<'EOF'
-# 粘贴即将放进 python_wave 块的完整代码（也支持直接粘贴整段 ```python_wave ... ``` 围栏）
+waveview check - --strict <<'EOF'
+# paste exact python_wave block content (or full markdown fence)
 EOF
 ```
 
-Use `--strict` (`waveview check - --strict`) if you want warnings or layout overlaps to fail with exit code `2`.
+Confirm before replying (Zero PNG Policy — **never** generate or read PNGs to inspect):
+- Exit `0` (`[waveview check] OK`, `svg=valid`)
+- Zero `truncated_labels`, `dropped_labels`, `crowded_arrows`, `crowded_notes`, `crowded_regions`
+- `@posedge` sample table & `describe()` steps match the intended protocol (or check `waveview check <script.py> --format json` / `d.to_dict()` / `d.inspect("json")` programmatically).
 
-### Self-check Checklist (Zero PNG Policy)
+If `truncated_labels` or crowding occurs: use `width=900` (or `max_width=None` when hitting `2400px`), `pad=False` on wide buses, `d.gap(...)` for idle spans, or shorten labels / move text to `d.caption(...)`.
 
-Before emitting the ```` ```python_wave ```` block in your response, confirm from `waveview check` output:
-- Exit code is `0` (`[waveview check] OK`, `svg=valid`)
-- Zero `truncated_labels` (bus labels clipped with `…`)
-- Zero `dropped_labels` (bus labels completely hidden because the segment is too narrow)
-- Zero `crowded_arrows` (causality arrows still colliding with existing elements)
-- Zero `crowded_notes` (single-point callout notes still colliding with existing elements)
-- Zero `crowded_regions` (adjacent `region` / `marker` labels colliding above waves)
-- The `@posedge` / edge-sampled table and chronological `describe()` steps match the intended hardware protocol cycle-by-cycle
+## References (Read On Demand Only)
 
-**Never generate `.png` files or call `read_file` on PNGs to inspect your own waveform.** `waveview check` layout stats + clock-edge sampling are complete and unambiguous.
-
-If `truncated_labels`, `dropped_labels`, `crowded_arrows`, `crowded_notes`, or `crowded_regions` appear:
-- Pass `max_width=None` on `Diagram(...)` to let long wide-bus diagrams auto-expand past `2400px`, pass `pad=False` on `d.bus(..., width=32, pad=False)` to omit leading zeros without giving up 32-bit range checks, increase `px_per_ns`, or collapse idle intervals with `d.gap(...)`,
-- Shorten bus value text or region/arrow/note labels, move long explanations into `d.caption(...)`, or add intermediate cycle spacing.
-
-### Visible Waveform Annotations (Self-Contained Diagrams; Use Library Methods Only)
-
-In TUI replies, `extensions/waveview.ts` replaces the entire ```` ```python_wave ```` block with rendered SVG—any Python `# ...` comment inside the code block becomes **invisible** to the user.
-
-- **Use only the built-in `Diagram` annotation functions; NEVER improvise or hand-draw comments:**
-  - Every annotation must go through `d.note(...)`, `d.caption(...)`, `d.arrow(...)`, `d.region(...)`, `d.marker(...)`, or `d.measure(...)`.
-  - Do **NOT** write user-facing explanations in Python `#` comments, create fake `d.bus(...)` / `d.wire(...)` rows to hold text, hand-patch `<svg>` elements onto `d.to_svg()`, or fall back to hand-drawn SVG / ASCII diagrams.
-- **Put timing explanations directly into the diagram ("能体现在图里就体现在图里"):**
-  - Make the waveform figure self-contained so the user can understand the timing just by looking at the diagram.
-  - Do **NOT** repeat or dump cycle-by-cycle timing narration separately in the chat reply prose (e.g., "at 10ns `valid` rises, at 20ns `ready` asserts...") whenever that timing can be shown inside the diagram using library annotations—keep surrounding reply text minimal.
-- Choose the matching library method for each kind of explanation:
-  - `d.note(clk, e_hs, "握手")`, `d.note(clk.posedge(3), "采样沿")`, or `d.note(ready, e_hs, "握手沿")`: single-point callout badge + leader line attached to a waveform point (no full-height vertical line). **Warning:** never attach a handshake `note` to a `valid` point that drops `1→0` on that exact edge (`d.note(e_hs.valid, ...)` puts the dot on the falling edge and misleads readers); anchor it on the clock edge (`d.note(clk, e_hs, ...)`), on the steady-high partner (`d.note(ready, e_hs, ...)`), or use `d.marker(e_hs, ...)`.
-  - `d.arrow(...)`, `d.region(...)`, `d.marker(...)`, `d.measure(...)`: causality arrows accept `Point` (`e1.a`, `clk.posedge(n)`, `sig.at(e2)`) **or `(row, TimeRef)` tuples** such as `d.arrow(e1.valid, (ready, e3), "握手")` when `ready` didn't toggle on that edge; phase/window highlights, global vertical markers, and timing intervals.
-  - `d.caption("Note 1: ...", "Note 2: ...")`: left-aligned multi-line explanatory footer below the time axis for protocol rules, preconditions, and longer remarks.
-
-## Workflow B: Python 时序识别与协议核对
-
-Use structured inspection when reading an existing waveform script, verifying RTL-like behavior, or checking clock-domain / handshake timing in Python.
-
-### CLI Commands
-
-```bash
-waveview check examples/apb.py               # 健康状态 + 画布指标 + describe() + 时钟采样表
-waveview check examples/gated_spi.py --format json   # 结构化 JSON，便于程序读取每拍采样
-waveview check examples/apb.py --strict      # 有 warning 或布局拥挤时返回退出码 2
-waveview render examples/apb.py -o out/apb.svg       # 显式导出 .svg（-o - 输出 SVG 到 stdout，或 .png --scale 2）
-```
-
-### Python Inspection API
-
-```python
-samples = d.sample("clk", edge="rise")  # [{"edge": 1, "time": "0ns", "time_s": 0.0, "signals": {name: {"sampled": ..., "after": ..., "changed": bool}}}, ...]
-hs = d.handshakes("clk", valid, ready)  # [{"edge": 4, "time": "30ns", "time_s": 3e-8}, ...]
-d.expect_handshake("clk", valid, ready, at=e_hs, count=1)  # Fails loudly with hint if beat is off by 1 cycle
-d.expect_stable(wdata, e_start, e_hs, no_x=True)           # Asserts payload held steady and non-x/z over [start, end)
-data = d.to_dict()                      # Full structured dict: ok, svg_valid, canvas, warnings, layout_issues, clock_samples, steps, ...
-report = d.inspect(fmt="text")          # fmt="text" or fmt="json"
-script = d.describe()                   # Strict time-ordered text playback (old->new)
-```
-
-How to interpret `sampled` vs `after` in `d.sample()`:
-- **`sampled`**: Signal value seen *immediately before* the clock edge (what flip-flops sample on that edge).
-- **`after`**: Signal value settled *at/after* the clock edge (new register outputs triggered on that edge).
-- **`changed`**: `True` if `sampled != after` on that edge.
-
-## Core DSL Rules & Common Pitfalls
-
-- **Clock first-edge & `phase=0` semantics**: `d.clock(freq="100MHz")` (`period="10ns"`, default `phase=0`, `duty=0.5`) places rising edges at **`0ns (#1), 10ns (#2), 20ns (#3), ...`** (NOT `5 / 15 / 25ns`), and falling edges at `5ns, 15ns, 25ns, ...`. Before any wait/set call, `d.now` is uninitialized (`None`), so the **first `d.posedge(clk)` lands on `#1` at `t=0ns`** (when `phase=0`). Call a bare `d.posedge(clk)` first if `[0, period)` should show idle initial values before driving inputs on `#2`.
-- **Exact signal names**: `d.wire("valid")` means assignments must use `valid=...` (never `v=...`).
-- **Event handle scoping & handshake anchors**: `e = d.posedge(clk)(valid=1)` only exposes signals assigned in that event; accessing `e.ready` raises `WaveError`. When annotating a signal that stays constant on that beat (e.g. a ready/valid handshake), pass `(ready, e3)` directly to `d.arrow(e1.valid, (ready, e3), "握手")`, or pass `e3` as `TimeRef` to `d.note(ready, e3, ...)` / `d.point(ready, e3)` / `ready.at(e3)` instead of hardcoding timestamps. If using `warn_noop=False`, same-value assignments are omitted from `describe()`/`steps` noise while `e.ready` remains valid.
-- **Call wait helpers to assign**: `d.posedge(clk)` / `d.delay(...)` / `d.at(...)` return a `Wait` handle — either call it immediately `e = d.posedge(clk)(valid=1)` or follow with `d.set(valid=1)`. Note that any `Event`, `Point`, `Wait`, `Instant`, or `clk.posedge(n)` works directly as `TimeRef` across `arrow`/`note`/`region`/`marker`/`measure`/`point`/`sig.at`. Use `d.clock(..., tco="1.5ns")` (or `d.posedge(clk, tco="1.5ns")`) when showing realistic register clock-to-output propagation delay.
-- **Avoid manual nanosecond math for annotations**: Never hardcode `"30ns"` when an `Event`, `Wait`, `d.now`, or `clk.posedge(n)` handle exists for that cycle.
-- **Declare then drive**: Initialize idle/reset values in `wire(..., init=...)` or `bus(..., init=...)`; avoid unused signals left at default `"x"` (triggers `WaveWarning`).
-- **Self-contained annotations via library methods only**: Put every comment and timing explanation inside the diagram using the provided `Diagram` methods (`d.note`, `d.caption`, `d.arrow`, `d.region`, `d.marker`, `d.measure`)—never improvise Python `#` comments, fake dummy rows, or hand-drawn SVG, and avoid narrating edge-by-edge timing separately in reply prose when the diagram can express it.
-- **Out-of-range events**: Events or annotations past manual `end=` emit `WaveWarning`.
-
-## References
-
-See [references/api-and-schema.md](references/api-and-schema.md) for complete `Diagram` / `Clock` / inspection API signatures, `waveview check --format json` schema keys, and copy-ready protocol templates.
+Only open [references/api-and-schema.md](references/api-and-schema.md) when you specifically need gated-clock `enable`/`disable` details, the full `waveview check --format json` schema keys, or copy-ready multi-channel protocol templates (Setup/Hold/`tco`, AXI-Stream, 2-FF CDC, SPI, AXI4 Write Burst, AXI4-Lite Read).

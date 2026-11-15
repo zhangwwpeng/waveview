@@ -375,10 +375,14 @@ def test_max_width_none_prevents_wide_bus_truncation():
     capped = build(2400.0).to_dict()
     assert capped["canvas"]["hit_width_cap"] is True
     assert capped["canvas"]["truncated_labels"]
+    assert capped["canvas"]["width_drivers"]
+    assert capped["canvas"]["width_drivers"][0]["kind"] == "bus"
+    assert capped["canvas"]["width_drivers"][0]["signal"] == "data"
     assert any("max_width=None" in issue for issue in capped["layout_issues"])
 
     uncapped = build(None).to_dict()
     assert uncapped["canvas"]["hit_width_cap"] is False
+    assert uncapped["canvas"]["width_drivers"] == []
     assert uncapped["canvas"]["truncated_labels"] == []
     assert uncapped["ok"] is True
 
@@ -463,3 +467,76 @@ def test_handshakes_expect_handshake_and_expect_stable():
     assert d_tco.expect_handshake(c_tco, v_tco, r_tco, at=e_hs_tco, count=1) == [
         {"edge": 3, "time": "20ns", "time_s": 2e-08}
     ]
+
+
+def test_target_width_and_width_drivers():
+    # 1. Clean fit to target width on standard clocked diagram.
+    d = Diagram("AXI Target Width", width=900)
+    clk = d.clock("clk", freq="100MHz")
+    valid = d.wire("valid", init=0)
+    data = d.bus("data", init="x", width=16, pad=False)
+    d.posedge(clk)
+    d.posedge(clk)(valid=1, data=0x270F)
+    d.posedge(clk)(valid=0, data="x")
+
+    info = d.to_dict()
+    assert info["ok"] is True
+    assert info["canvas"]["width"] == 900.0
+    assert info["canvas"]["target_width"] == 900.0
+    assert info["canvas"]["width_drivers"] == []
+    assert info["canvas"]["truncated_labels"] == []
+
+    # 2. Target width accounts accurately for grouped label rail + collapsed gaps.
+    d_gap = Diagram("Gapped Target", width=850)
+    c_gap = d_gap.clock("aclk", freq="100MHz")
+    with d_gap.group("Write Channel"):
+        awvalid = d_gap.wire("awvalid", init=0, label="AWVALID")
+    d_gap.posedge(c_gap)(awvalid=1)
+    d_gap.gap("50ns")
+    d_gap.posedge(c_gap)(awvalid=0)
+
+    gap_info = d_gap.to_dict()
+    assert abs(gap_info["canvas"]["width"] - 850.0) <= 0.05
+    assert gap_info["canvas"]["width_drivers"] == []
+
+    # 3. Bus hard non-truncation constraint wins over narrow width= and reports driver.
+    d_bus = Diagram("Bus Driver", width=360)
+    c_bus = d_bus.clock("clk", freq="100MHz")
+    wdata = d_bus.bus("wdata", init=0, width=32, pad=False)
+    d_bus.posedge(c_bus)(wdata=0xCAFEBABE)
+    d_bus.posedge(c_bus)(wdata=0)
+
+    bus_info = d_bus.to_dict()
+    assert bus_info["ok"] is True
+    assert bus_info["canvas"]["truncated_labels"] == []
+    assert bus_info["canvas"]["width"] > 360.0
+    assert any(
+        drv["kind"] == "bus" and drv["signal"] == "wdata" and drv["value"] == "0xCAFEBABE"
+        for drv in bus_info["canvas"]["width_drivers"]
+    )
+    text_out = d_bus.inspect("text")
+    assert '宽度自适应：目标 360px -> 实际 ' in text_out
+    assert 'wdata="0xCAFEBABE"' in text_out
+
+    # 4. Clock floor (5px per half-cycle) wins over narrow width= on many-cycle trace.
+    d_clk = Diagram("Clock Floor", width=300, end="500ns")
+    d_clk.clock("clk", period="10ns")
+    sig = d_clk.wire("sig", init=0)
+    d_clk.at("20ns")(sig=1)
+
+    clk_info = d_clk.to_dict()
+    assert clk_info["canvas"]["width"] > 300.0
+    assert any(drv["kind"] == "clock_floor" for drv in clk_info["canvas"]["width_drivers"])
+
+    # 5. Title and caption exceeding target width are recorded in width_drivers.
+    d_cap = Diagram("X" * 80, width=400)
+    c_cap = d_cap.clock("clk", period="10ns")
+    v_cap = d_cap.wire("v", init=0)
+    d_cap.posedge(c_cap)(v=1)
+    d_cap.caption("Very long explanatory caption footer " * 4)
+
+    cap_info = d_cap.to_dict()
+    assert cap_info["canvas"]["width"] > 400.0
+    kinds = {drv["kind"] for drv in cap_info["canvas"]["width_drivers"]}
+    assert "caption" in kinds
+    assert "title" in kinds

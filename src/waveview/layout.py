@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from fractions import Fraction
 from typing import TYPE_CHECKING, Any
 
-from .model import Arrow, Clock, Gap, Marker, Measure, Note, Region, Row, Signal
+from .model import Arrow, Clock, Gap, Marker, Measure, Note, Region, Row, Signal, Value
 from .units import TIME_UNITS, format_time
 
 if TYPE_CHECKING:
@@ -132,7 +132,9 @@ class RenderStats:
     width: float = 0.0
     height: float = 0.0
     px_per_ns: float = 0.0
+    target_width: float | None = None
     hit_width_cap: bool = False
+    width_drivers: list[dict[str, Any]] = field(default_factory=list)
     truncated_labels: list[dict[str, Any]] = field(default_factory=list)
     dropped_labels: list[dict[str, Any]] = field(default_factory=list)
     crowded_arrows: list[dict[str, Any]] = field(default_factory=list)
@@ -140,32 +142,118 @@ class RenderStats:
     crowded_regions: list[dict[str, Any]] = field(default_factory=list)
 
 
-def _scale_with_cap(d: Diagram, visible_span: Fraction, gaps: list[Gap], end: Fraction) -> tuple[float, bool]:
+def _label_rail_x0(d: Diagram) -> float:
+    label_w = 0.0
+    open_names: list[str] = []
+    for row in d.rows:
+        common = 0
+        while common < len(open_names) and common < len(row.groups) and open_names[common] == row.groups[common]:
+            common += 1
+        del open_names[common:]
+        for depth in range(common, len(row.groups)):
+            gname = row.groups[depth]
+            label_w = max(label_w, depth * INDENT + text_width(gname, 12))
+            open_names.append(gname)
+        is_ascii = all(ord(ch) < 128 for ch in row.label)
+        label_w = max(label_w, len(row.groups) * INDENT + text_width(row.label, LABEL_SIZE, mono=is_ascii))
+    return PAD + label_w + 22
+
+
+def _resolve_scale(
+    d: Diagram,
+    visible_span: Fraction,
+    gaps: list[Gap],
+    end: Fraction,
+    x0: float,
+) -> tuple[float, bool, list[dict[str, Any]]]:
     if d.px_per_ns:
-        return d.px_per_ns * 1e9, False
+        return d.px_per_ns * 1e9, False, []
+
     clocks = [r for r in d.rows if isinstance(r, Clock)]
     span = float(visible_span) or 1e-9
+    wave_base = x0 + len(gaps) * GAP_W + PAD + 26
     if not clocks:
-        scale, floor = 900 / span, 0.0
+        default_scale = 900 / span
+        floor = (40.0 / float(visible_span)) if (d.width is not None and visible_span > 0) else 0.0
     else:
         half = float(min(min(c.duty, 1 - c.duty) * c.period for c in clocks))
-        scale, floor = 16 / half, 5 / half
+        default_scale, floor = 16 / half, 5 / half
+
     # Widen until every bus value fits in its own visible sub-segment.
+    bus_max_scale = 0.0
+    bus_peaks: list[dict[str, Any]] = []
     for r in d.rows:
         if isinstance(r, Signal) and r.kind == "bus":
+            best_need = 0.0
+            best_seg: tuple[Fraction, Fraction, Value] | None = None
             for t0, t1, v in r.segments(end):
                 if v in ("x", "z"):
                     continue
                 vis = _max_visible_span(t0, t1, gaps)
                 if vis <= 0:
                     continue
-                need = text_width(r.display(v), VALUE_SIZE, mono=True) + 18
-                scale = max(scale, need / float(vis))
+                need_scale = (text_width(r.display(v), VALUE_SIZE, mono=True) + 18) / float(vis)
+                if need_scale > best_need:
+                    best_need = need_scale
+                    best_seg = (t0, t1, v)
+            if best_seg is not None:
+                bus_max_scale = max(bus_max_scale, best_need)
+                t0, t1, v = best_seg
+                bus_peaks.append(
+                    {
+                        "kind": "bus",
+                        "signal": r.name,
+                        "value": r.display(v),
+                        "start": format_time(t0, d.timescale),
+                        "end": format_time(t1, d.timescale),
+                        "min_width": round(wave_base + float(visible_span) * best_need, 2),
+                        "need_px_per_ns": round(best_need / 1e9, 4),
+                        "_scale": best_need,
+                    }
+                )
+
+    if d.width is not None:
+        avail_wave_px = d.width - wave_base
+        target_scale = (avail_wave_px / float(visible_span)) if (visible_span > 0 and avail_wave_px > 0) else 0.0
+        scale = max(target_scale, floor, bus_max_scale)
+        drivers: list[dict[str, Any]] = []
+        floor_width = wave_base + float(visible_span) * floor
+        if floor_width > d.width + 0.05:
+            if clocks:
+                drivers.append(
+                    {
+                        "kind": "clock_floor",
+                        "min_width": round(floor_width, 2),
+                        "need_px_per_ns": round(floor / 1e9, 4),
+                    }
+                )
+            else:
+                drivers.append({"kind": "label_rail", "min_width": round(floor_width, 2)})
+        for item in bus_peaks:
+            if item["min_width"] > d.width + 0.05:
+                drivers.append({k: val for k, val in item.items() if k != "_scale"})
+        return scale, False, drivers
+
+    scale = max(default_scale, bus_max_scale)
     hit_cap = False
+    drivers = []
     if d.max_width is not None and span * scale > d.max_width:
-        scale = max(d.max_width / span, floor)
+        cap_scale = d.max_width / span
+        if floor > cap_scale:
+            drivers.append(
+                {
+                    "kind": "clock_floor",
+                    "min_width": round(wave_base + float(visible_span) * floor, 2),
+                    "need_px_per_ns": round(floor / 1e9, 4),
+                }
+            )
+        for item in bus_peaks:
+            if item["_scale"] > cap_scale:
+                drivers.append({k: val for k, val in item.items() if k != "_scale"})
+        drivers.sort(key=lambda item: item["min_width"], reverse=True)
+        scale = max(cap_scale, floor)
         hit_cap = True
-    return scale, hit_cap
+    return scale, hit_cap, drivers
 
 
 def _nice_step(raw: float) -> float:
@@ -308,8 +396,14 @@ def compute_layout(d: Diagram) -> DiagramLayout:
     end = d.end
     gaps = _merge_gaps(d.gaps, end)
     visible_span = end - sum((g.end - g.start for g in gaps), Fraction(0))
-    scale, hit_cap = _scale_with_cap(d, visible_span, gaps, end)
-    stats = RenderStats(px_per_ns=scale / 1e9, hit_width_cap=hit_cap)
+    x0 = _label_rail_x0(d)
+    scale, hit_cap, wave_drivers = _resolve_scale(d, visible_span, gaps, end, x0)
+    stats = RenderStats(
+        px_per_ns=scale / 1e9,
+        target_width=d.width,
+        hit_width_cap=hit_cap,
+        width_drivers=wave_drivers,
+    )
 
     markers = [a for a in d.annotations if isinstance(a, Marker) and Fraction(0) <= a.time <= end]
     measures = [a for a in d.annotations if isinstance(a, Measure) and a.end > 0 and a.start < end]
@@ -323,27 +417,13 @@ def compute_layout(d: Diagram) -> DiagramLayout:
     regions = [a for a in d.annotations if isinstance(a, Region) and a.end > 0 and a.start < end]
     notes = [a for a in d.annotations if isinstance(a, Note) and Fraction(0) <= a.time <= end]
 
-    label_w = 0.0
-    open_names: list[str] = []
-    for row in d.rows:
-        common = 0
-        while common < len(open_names) and common < len(row.groups) and open_names[common] == row.groups[common]:
-            common += 1
-        del open_names[common:]
-        for depth in range(common, len(row.groups)):
-            gname = row.groups[depth]
-            label_w = max(label_w, depth * INDENT + text_width(gname, 12))
-            open_names.append(gname)
-        is_ascii = all(ord(ch) < 128 for ch in row.label)
-        label_w = max(label_w, len(row.groups) * INDENT + text_width(row.label, LABEL_SIZE, mono=is_ascii))
-
-    x0 = PAD + label_w + 22
     tm = TimeMap(x0, scale, gaps, end)
     x_end = tm.x(end)
 
     marker_items: list[tuple[Marker, float, int]] = []
     marker_lane_rights: list[float] = []
     marker_max_right = 0.0
+    widest_marker: tuple[Marker, float] | None = None
     for m in sorted(markers, key=lambda mk: tm.x(mk.time)):
         x = tm.x(m.time)
         if not m.label:
@@ -360,7 +440,9 @@ def compute_layout(d: Diagram) -> DiagramLayout:
             marker_lane_rights.append(cx + half_w)
         else:
             marker_lane_rights[lane_idx] = cx + half_w
-        marker_max_right = max(marker_max_right, cx + half_w)
+        if cx + half_w > marker_max_right:
+            marker_max_right = cx + half_w
+            widest_marker = (m, cx + half_w)
         marker_items.append((m, cx, lane_idx))
     marker_band_h = (MARKER_BAND + max(0, len(marker_lane_rights) - 1) * 20) if marker_lane_rights else 0
 
@@ -430,22 +512,62 @@ def compute_layout(d: Diagram) -> DiagramLayout:
 
     captions_top: float | None = None
     caption_right = 0.0
+    widest_caption = ""
     if d.captions:
         captions_top = axis_y + AXIS_H + CAPTION_TOP_GAP
         height = captions_top + len(d.captions) * CAPTION_LINE_H + PAD - 4
-        caption_right = max(PAD + text_width(line, CAPTION_SIZE) + PAD for line in d.captions)
+        for line in d.captions:
+            right = PAD + text_width(line, CAPTION_SIZE) + PAD
+            if right > caption_right:
+                caption_right = right
+                widest_caption = line
 
-    note_min_right = max(x0 + text_width(n.label, 10.5) + 16 + PAD for n in notes) if notes else 0.0
+    note_min_right = 0.0
+    widest_note: Note | None = None
+    for n in notes:
+        right = x0 + text_width(n.label, 10.5) + 16 + PAD
+        if right > note_min_right:
+            note_min_right = right
+            widest_note = n
     title_right = (PAD + text_width(d.title, 15.5) + PAD) if d.title else 0.0
+    marker_right = (marker_max_right + PAD) if marker_max_right else 0.0
     width = max(
         x_end + PAD + 26,
         title_right,
-        marker_max_right + PAD if marker_max_right else 0.0,
+        marker_right,
         caption_right,
         note_min_right,
     )
     stats.width = round(width, 2)
     stats.height = round(height, 2)
+    if d.width is not None:
+        if title_right > d.width + 0.05 and d.title:
+            stats.width_drivers.append({"kind": "title", "value": d.title, "min_width": round(title_right, 2)})
+        if caption_right > d.width + 0.05 and widest_caption:
+            stats.width_drivers.append(
+                {"kind": "caption", "value": widest_caption, "min_width": round(caption_right, 2)}
+            )
+        if note_min_right > d.width + 0.05 and widest_note is not None:
+            stats.width_drivers.append(
+                {
+                    "kind": "note",
+                    "row": widest_note.row.name,
+                    "value": widest_note.label,
+                    "min_width": round(note_min_right, 2),
+                }
+            )
+        if marker_right > max(d.width, x_end + PAD + 26) + 0.05 and widest_marker is not None:
+            stats.width_drivers.append(
+                {
+                    "kind": "marker",
+                    "value": widest_marker[0].label or "",
+                    "min_width": round(marker_right, 2),
+                }
+            )
+        if stats.width <= d.width + 0.05:
+            stats.width_drivers.clear()
+        else:
+            stats.width_drivers.sort(key=lambda item: item["min_width"], reverse=True)
 
     return DiagramLayout(
         end=end,
