@@ -26,9 +26,11 @@ def test_svg_matches_snapshot(path):
     svg = load(path).to_svg()
     ET.fromstring(svg)  # well-formed
     snap = SNAPSHOTS / f"{path.stem}.svg"
-    if os.environ.get("UPDATE_SNAPSHOTS") or not snap.exists():
+    if os.environ.get("UPDATE_SNAPSHOTS"):
         SNAPSHOTS.mkdir(exist_ok=True)
         snap.write_text(svg, encoding="utf-8")
+    elif not snap.exists():
+        pytest.fail(f"Missing snapshot {snap.name}; run UPDATE_SNAPSHOTS=1 pytest to generate")
     assert svg == snap.read_text(encoding="utf-8"), f"{snap.name} changed; rerun with UPDATE_SNAPSHOTS=1 if intended"
 
 
@@ -36,9 +38,11 @@ def test_svg_matches_snapshot(path):
 def test_describe_matches_snapshot(path):
     text = load(path).describe()
     snap = SNAPSHOTS / f"{path.stem}.txt"
-    if os.environ.get("UPDATE_SNAPSHOTS") or not snap.exists():
+    if os.environ.get("UPDATE_SNAPSHOTS"):
         SNAPSHOTS.mkdir(exist_ok=True)
         snap.write_text(text, encoding="utf-8")
+    elif not snap.exists():
+        pytest.fail(f"Missing snapshot {snap.name}; run UPDATE_SNAPSHOTS=1 pytest to generate")
     assert text == snap.read_text(encoding="utf-8")
 
 
@@ -290,3 +294,199 @@ def test_arrow_tuple_and_unpadded_32bit_bus_render_valid_svg():
     assert "0x0000270F" not in svg
     assert stats.truncated_labels == []
     assert stats.crowded_regions == []
+
+
+def test_arrow_avoids_marker_and_note_avoids_grazing_bus_label():
+    from waveview import Diagram
+    from waveview.layout import compute_layout
+    from waveview.svg import render_with_stats
+
+    # 1. Same-row arrow on row 0 dodges marker_labels pill when blocked below by a region.
+    d_mkr = Diagram(width=600, end="40ns")
+    clk = d_mkr.clock("clk", period="40ns", duty=0.8)
+    p1 = d_mkr.point(clk, "5ns")
+    p2 = d_mkr.point(clk, "25ns")
+    d_mkr.region(clk, p1, p2, "REGION_BLOCKER_TEXT")
+    d_mkr.marker("15ns", "M1")
+    d_mkr.arrow(p1, p2, "ARR")
+
+    svg_mkr, stats_mkr = render_with_stats(d_mkr)
+    root_mkr = ET.fromstring(svg_mkr)
+    assert stats_mkr.crowded_arrows == []
+    texts_mkr = {el.text: (float(el.attrib["x"]), float(el.attrib["y"])) for el in root_mkr.iter() if el.tag.endswith("text")}
+    mkr_x, mkr_y = texts_mkr["M1"]
+    arr_x, arr_y = texts_mkr["ARR"]
+    # Without marker avoidance, ARR would sit right on M1 at 15ns midpoint; with it, ARR shifts to t=0.35.
+    assert abs(arr_y - mkr_y) >= 12.0 or abs(arr_x - mkr_x) >= 30.0
+
+    # 2. Note above wire row moves below the wire instead of grazing an adjacent upper-row bus label (gy=4.3px < 4.8px).
+    d_note = Diagram(width=600, end="40ns")
+    data = d_note.bus("data", init="x", width=16)
+    req = d_note.wire("req", init=0)
+    d_note.at("5ns")(data=0xCAFE)
+    e_req = d_note.at("10ns")(req=1)
+    d_note.at("15ns")(data="x")
+    d_note.note(e_req.req, "NOTE_A")
+
+    svg_note, stats_note = render_with_stats(d_note)
+    root_note = ET.fromstring(svg_note)
+    assert stats_note.crowded_notes == []
+    lay = compute_layout(d_note)
+    req_mid = lay.by_row[id(req)].mid
+    note_y = next(
+        float(el.attrib["y"])
+        for el in root_note.iter()
+        if el.tag.endswith("text") and el.text == "NOTE_A"
+    )
+    assert note_y > req_mid + 10.0
+
+
+def test_clock_draws_edge_at_zero_and_gap_end_and_all_gap_width_safe():
+    from waveview import Diagram
+    from waveview.layout import compute_layout
+
+    # 1.phase=0 clock draws rising edge at t=0 and right at gap.end (30ns).
+    d = Diagram(end="50ns")
+    clk = d.clock("clk", period="10ns")
+    req = d.wire("req", init=0)
+    d.at("10ns")(req=1)
+    d.gap("20ns")  # [10ns, 30ns)
+    d.posedge(clk)(req=0)  # 30ns
+
+    svg = d.to_svg()
+    root = ET.fromstring(svg)
+    lay = compute_layout(d)
+    b_clk = lay.by_row[id(clk)]
+    clk_path = next(
+        el.attrib["d"]
+        for el in root.findall(".//{http://www.w3.org/2000/svg}path")
+        if el.attrib.get("stroke") == THEMES["light"]["clock"] and el.attrib.get("stroke-width") == "1.5"
+    )
+    # Must contain vertical rise V<hi> at x(0) and x(30ns) (not starting already high).
+    assert clk_path.startswith(f"M{lay.tm.x(lay.tm.visible()[0][0]):g},{b_clk.lo:g}") or (
+        f",{b_clk.lo:.0f}" in clk_path.split()[0]
+    )
+    assert clk_path.count(f"V{b_clk.hi:g}") >= 4  # rises at 0ns, 30ns, 40ns, (50ns)
+
+    # 2. Target width + no clocks + full-span gap must not raise ZeroDivisionError.
+    d_full_gap = Diagram(width=900, end="100ns")
+    d_full_gap.wire("w", init=0)
+    d_full_gap.gap("100ns")
+    svg_gap = d_full_gap.to_svg()
+    ET.fromstring(svg_gap)
+
+
+def test_p1_layout_and_svg_collision_guards():
+    from waveview import Diagram
+    from waveview.layout import PAD, compute_layout, text_width
+    from waveview.svg import render_with_stats
+
+    # P1 #10: Note and cross-row arrow avoid measure labels and stay above measure lanes.
+    d_meas = Diagram(end="40ns")
+    sig = d_meas.wire("sig", init=0)
+    e1 = d_meas.at("10ns")(sig=1)
+    e2 = d_meas.at("30ns")(sig=0)
+    d_meas.measure(e1.sig, e2.sig, "MEAS_SPAN")
+    d_meas.note(sig, "20ns", "NOTE_ABOVE_MEAS")
+
+    svg_m, stats_m = render_with_stats(d_meas)
+    root_m = ET.fromstring(svg_m)
+    lay_m = compute_layout(d_meas)
+    assert stats_m.crowded_notes == []
+    texts_m = {el.text: float(el.attrib["y"]) for el in root_m.iter() if el.tag.endswith("text")}
+    assert texts_m["NOTE_ABOVE_MEAS"] < lay_m.lanes_top
+    assert texts_m["NOTE_ABOVE_MEAS"] < texts_m["MEAS_SPAN"] - 12.0
+
+    d_meas_arr = Diagram(end="40ns")
+    a = d_meas_arr.wire("a", init=0)
+    b = d_meas_arr.wire("b", init=0)
+    ea = d_meas_arr.at("5ns")(a=1)
+    eb = d_meas_arr.at("35ns")(b=1)
+    d_meas_arr.measure(ea.a, eb.b, "MEAS_LANE")
+    d_meas_arr.arrow(ea.a, eb.b, "ARR_LANE")
+    svg_ma, stats_ma = render_with_stats(d_meas_arr)
+    root_ma = ET.fromstring(svg_ma)
+    lay_ma = compute_layout(d_meas_arr)
+    assert stats_ma.crowded_arrows == []
+    arr_y = next(float(el.attrib["y"]) for el in root_ma.iter() if el.tag.endswith("text") and el.text == "ARR_LANE")
+    assert arr_y < lay_ma.lanes_top
+
+    # P1 #11: text_width measures spaces in mono=True at 0.61 * size (not 0.34 * size).
+    assert text_width("AA BB", size=10, mono=True) > text_width("AABB", size=10, mono=True) + 5.5
+    d_mono = Diagram(end="20ns", px_per_ns=5)
+    bus = d_mono.bus("data", init="x")
+    d_mono.set(data="DE AD BE EF")
+    d_mono.at("15ns")(data="x")
+    _, stats_mono = render_with_stats(d_mono)
+    assert any(item["value"] == "DE AD BE EF" for item in stats_mono.truncated_labels)
+
+    # P1 #12: Row-0 marker keeps its markers_bottom baseline even when a row-0 note adds top padding.
+    d_mkr_note = Diagram(end="40ns")
+    s_mn = d_mkr_note.wire("sig", init=0)
+    d_mkr_note.at("10ns")(sig=1)
+    d_mkr_note.at("30ns")(sig=0)
+    d_mkr_note.marker("20ns", "MKR_TOP")
+    d_mkr_note.note(s_mn, "20ns", "NOTE_ROW0")
+    svg_mn, stats_mn = render_with_stats(d_mkr_note)
+    root_mn = ET.fromstring(svg_mn)
+    lay_mn = compute_layout(d_mkr_note)
+    assert stats_mn.crowded_notes == []
+    texts_mn = {el.text: float(el.attrib["y"]) for el in root_mn.iter() if el.tag.endswith("text")}
+    assert abs(texts_mn["MKR_TOP"] - (lay_mn.markers_bottom - 8.0)) < 1e-6
+    assert texts_mn["MKR_TOP"] < texts_mn["NOTE_ROW0"] - 12.0
+
+    # P1 #13: Huge gap tick labels expand step so adjacent axis labels never overlap.
+    d_ticks = Diagram(timescale="ns", end="10000100ns")
+    d_ticks.wire("sig", init=0)
+    d_ticks.gap("10000000ns")
+    d_ticks.at("10000020ns")(sig=1)
+    svg_t = d_ticks.to_svg()
+    root_t = ET.fromstring(svg_t)
+    lay_t = compute_layout(d_ticks)
+    axis_ticks = sorted(
+        (float(el.attrib["x"]), el.text or "")
+        for el in root_t.iter()
+        if el.tag.endswith("text")
+        and abs(float(el.attrib["y"]) - (lay_t.axis_y + 16.0)) < 1e-6
+        and el.text
+    )
+    assert len(axis_ticks) >= 2
+    for (x1, lbl1), (x2, lbl2) in zip(axis_ticks, axis_ticks[1:]):
+        min_gap = (text_width(lbl1, 10, mono=True) + text_width(lbl2, 10, mono=True)) / 2.0 + 1.0
+        assert x2 - x1 >= min_gap
+
+    # P1 #14: Wide centered annotations expand canvas width and respect PAD margins.
+    d_wide_ann = Diagram(end="10ns", px_per_ns=5)
+    sw = d_wide_ann.wire("s", init=0)
+    w1 = d_wide_ann.at("2ns")(s=1)
+    w2 = d_wide_ann.at("8ns")(s=0)
+    wide_labels = [
+        "VERY_LONG_CENTERED_MARKER_LABEL",
+        "VERY_LONG_CENTERED_MEASURE_LABEL",
+        "VERY_LONG_CENTERED_REGION_LABEL",
+        "VERY_LONG_CENTERED_ARROW_LABEL",
+    ]
+    d_wide_ann.marker("5ns", wide_labels[0])
+    d_wide_ann.measure(w1.s, w2.s, wide_labels[1])
+    d_wide_ann.region(sw, w1.s, w2.s, wide_labels[2])
+    d_wide_ann.arrow(w1.s, w2.s, wide_labels[3])
+    svg_wa = d_wide_ann.to_svg()
+    root_wa = ET.fromstring(svg_wa)
+    lay_wa = compute_layout(d_wide_ann)
+    assert abs(float(root_wa.attrib["width"]) - lay_wa.width) < 0.02
+    by_lbl = {el.text: float(el.attrib["x"]) for el in root_wa.iter() if el.tag.endswith("text") and el.text}
+    for lbl in wide_labels:
+        size = 10.0 if "REGION" in lbl else 10.5
+        hw = text_width(lbl, size) / 2.0
+        cx = by_lbl[lbl]
+        assert cx - hw >= PAD - 0.5
+        assert cx + hw <= lay_wa.width - PAD + 0.5
+
+    # P1 #16: Default max_width=2400 constrains total SVG width (not just waveform span).
+    d_cap = Diagram(end="500ns")
+    d_cap.clock("clk", period="10ns")
+    d_cap.wire("very_long_peripheral_signal_name", init=0)
+    lay_cap = compute_layout(d_cap)
+    root_cap = ET.fromstring(d_cap.to_svg())
+    assert lay_cap.width <= 2400.0
+    assert float(root_cap.attrib["width"]) <= 2400.0

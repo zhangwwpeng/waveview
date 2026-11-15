@@ -28,7 +28,7 @@ d = Diagram(
   - Gated clock options:
     - Set `idle=0` or `idle=1`, and pass `start=`/`stop=` or `gated=True` with `clk.enable(at=None)` / `clk.disable(at=None)` (default `at` = `d.now`).
 - `d.wire(name, init="x", label=None) -> Signal` (allowed values: `0`, `1`, `"0"`, `"1"`, `True`, `False`, `"x"`, `"z"`).
-- `d.bus(name, init="x", width=None, fmt="hex", label=None, pad=True) -> Signal` (`fmt`: `"hex"` | `"dec"` | `"bin"`; values: non-negative `int`, `str`, `"x"`, `"z"`; set `pad=False` to omit leading zeros e.g. `0x270F` on a `width=32` bus while retaining full 32-bit range checks).
+- `d.bus(name, init="x", width=None, fmt="hex", label=None, pad=True) -> Signal` (`fmt`: `"hex"` | `"dec"` | `"bin"`; values: non-negative `int`, hex/bin/oct literal strings like `"0x270F"` matching integer range/equality checks, arbitrary state labels, `"x"`, `"z"`; set `pad=False` to omit leading zeros e.g. `0x270F` on a `width=32` bus while retaining full 32-bit range checks; names starting with `_` are rejected—use `label=`).
 - `with d.group("Group Label"): ...` — nests row groups on the left rail.
 
 ## 2. Advancing Time & Assignments
@@ -38,10 +38,10 @@ Wait methods advance/move `d.now` and return a `Wait` object; call the `Wait` ob
 - `d.posedge(clk, n=1, *, tco=None)(**values) -> Event`
 - `d.negedge(clk, n=1, *, tco=None)(**values) -> Event`
 - `d.delay(t)(**values) -> Event`
-- `d.at(t)(**values) -> Event` (warns if jumping backward relative to `d.now`)
+- `d.at(t: TimeRef)(**values) -> Event` (warns if jumping backward relative to `d.now`)
 - `d.gap(t)(**values) -> Event` (compresses long idle interval with a visual break mark)
 - `d.set(**values) -> Event` (assign at current `d.now`)
-- `d.now -> Instant` (current cursor timestamp)
+- `d.now -> Instant` (current cursor timestamp; `started=False` before the first time move)
 
 Event handles & non-mutating `Point` / `TimeRef` anchors (**no hardcoded `"30ns"` needed**):
 - **Every `Event`, `Point`, `Wait`, `Instant`, or `clk.posedge(n)` / `clk.negedge(n)` can be passed directly as `TimeRef`** to `d.note(row, ref, text)`, `d.region(row, start, end)`, `d.marker(ref)`, `d.measure(start, end)`, `d.point(row, ref)`, `sig.at(ref)`, and the second item of an `arrow` tuple `(row, ref)` — never hand-calculate `"30ns"` when an event handle already exists for that beat.
@@ -71,8 +71,8 @@ Event handles & non-mutating `Point` / `TimeRef` anchors (**no hardcoded `"30ns"
     ```json
     {
       "edge": 1,
-      "time": "5ns",
-      "time_s": 5e-9,
+      "time": "0ns",
+      "time_s": 0.0,
       "signals": {
         "valid": {"sampled": "0", "after": "1", "changed": true}
       }
@@ -81,10 +81,10 @@ Event handles & non-mutating `Point` / `TimeRef` anchors (**no hardcoded `"30ns"
   - `sampled`: signal value strictly before the edge (`value_before(t)`).
   - `after`: signal value at the edge (`value_at(t)`).
   - `changed`: `True` when `sampled != after`.
-- `d.handshakes(clk, valid, ready, *, edge="rise", active=1, include_gaps=True) -> list[dict]`
+- `d.handshakes(clk, valid, ready, *, edge="rise", active=1, include_gaps=False) -> list[dict]`
   - Returns `[{"edge": 4, "time": "30ns", "time_s": 3e-8}, ...]` for all active edges where both `valid` and `ready` are sampled at `active`.
-- `d.expect_handshake(clk, valid, ready, *, at=None, count=None, edge="rise", active=1) -> list[dict]`
-  - Declarative protocol assertion: raises `WaveError` (showing exact sampled values, 1-cycle-shift hint, and actual handshake edges) if `at` is not a true handshake edge or total count differs from `count`. Adjusts automatically when `at` includes `clk.tco`.
+- `d.expect_handshake(clk, valid, ready, *, at=None, count=None, edge="rise", active=1, include_gaps=False) -> list[dict]`
+  - Declarative protocol assertion: raises `WaveError` (showing exact sampled values, 1-cycle-shift hint, and actual handshake edges) if `at` is not a true visible handshake edge or total count differs from `count`. Adjusts automatically when `at` includes `clk.tco`.
 - `d.expect_stable(sig, start, end, *, no_x=True) -> Value`
   - Asserts `sig` stays unchanged (and non-`x`/`z` when `no_x=True`) over `[start, end)`. Raises `WaveError` on glitches or unknowns.
 - `d.to_dict() -> dict` — full schema documented below.
@@ -94,8 +94,8 @@ Event handles & non-mutating `Point` / `TimeRef` anchors (**no hardcoded `"30ns"
 
 - `waveview check [source="-"] [--format text|json] [--strict]`
   - `source`: path to `.py` script, Markdown snippet, or `-` for stdin.
-  - Automatically extracts code from ```` ```python_wave ```` / ```` ```waveview ```` / fenced blocks if Markdown is piped in, and runs with `__name__ = "__waveview_cli__"` so `if __name__ == "__main__":` blocks are skipped.
-  - Picks `d` if it is a `Diagram`, otherwise the last `Diagram` instance created in module globals.
+  - Automatically extracts dedented code from ```` ```python_wave ```` / ```` ~~~python_wave ```` / fenced blocks for Markdown inputs (even after prose), runs `.py` files directly without scanning docstring fences, and executes with `__name__ = "__waveview_cli__"` and UTF-8 stdio so `if __name__ == "__main__":` blocks are skipped.
+  - Picks `d` if it is a `Diagram`, otherwise the last instantiated `Diagram` in module globals.
   - Exit codes:
     - `0`: valid SVG (and no warnings/layout issues, or non-strict mode).
     - `1`: syntax/runtime error, `WaveError`, missing `Diagram`, invalid SVG XML, or file read error.

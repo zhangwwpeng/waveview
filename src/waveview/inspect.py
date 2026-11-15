@@ -8,9 +8,11 @@ import xml.etree.ElementTree as ET
 from fractions import Fraction
 from typing import TYPE_CHECKING, Any, Literal
 
+from .diagram import Event, Wait
 from .errors import WaveError, WaveWarning
+from .layout import TimeMap, _merge_gaps
 from .model import Arrow, Clock, EdgeKind, Marker, Measure, Note, Region, Signal, Value
-from .svg import TimeMap, _merge_gaps, render_with_stats
+from .svg import render_with_stats
 from .units import format_freq, format_time
 
 if TYPE_CHECKING:
@@ -43,6 +45,17 @@ def _edge_index(clk: Clock, kind: EdgeKind, t: Fraction) -> int:
         k = int((t - base) / clk.period)
         return k - clk._first_k(kind) + 1
     return clk._count_gated_edges(kind, t)
+
+
+def _value_after_edge(d: Diagram, clock: Clock, t: Fraction, sig: Signal) -> Value:
+    """Return ``sig``'s value after synchronous updates driven by ``clock`` at ``t``."""
+    after = sig.value_at(t)
+    matching = [s for s in d.steps if s.edge_clock is clock and s.edge_time == t]
+    for step in sorted(matching, key=lambda s: s.time):
+        for s, _old, new in step.changes:
+            if s is sig:
+                after = new
+    return after
 
 
 def sample_clock(
@@ -87,7 +100,7 @@ def sample_clock(
             sig_map: dict[str, dict[str, Any]] = {}
             for sig in signals:
                 before = sig.value_before(t)
-                after = sig.value_at(t)
+                after = _value_after_edge(d, clock, t, sig)
                 changed = type(before) is not type(after) or before != after
                 sig_map[sig.name] = {
                     "sampled": sig.display(before),
@@ -113,7 +126,7 @@ def find_handshakes(
     *,
     edge: EdgeKind = "rise",
     active: Value = 1,
-    include_gaps: bool = True,
+    include_gaps: bool = False,
 ) -> list[dict[str, Any]]:
     """Return clock edges where both ``valid`` and ``ready`` sample equal to ``active``."""
     clock = d._clock(clk)
@@ -140,6 +153,7 @@ def expect_handshake(
     count: int | None = None,
     edge: EdgeKind = "rise",
     active: Value = 1,
+    include_gaps: bool = False,
 ) -> list[dict[str, Any]]:
     """Assert valid/ready handshake at ``at`` and/or exact ``count``, raising ``WaveError`` on mismatch."""
     clock = d._clock(clk)
@@ -152,19 +166,35 @@ def expect_handshake(
     if count is not None and (isinstance(count, bool) or not isinstance(count, int) or count < 0):
         raise WaveError(f"count 必须是非负整数，收到的是 {count!r}")
 
-    actual = find_handshakes(d, clock, v_sig, r_sig, edge=edge, active=active, include_gaps=True)
+    actual = find_handshakes(d, clock, v_sig, r_sig, edge=edge, active=active, include_gaps=include_gaps)
 
     if at is not None:
-        raw_t = d._resolve(at)
-        if raw_t < 0:
-            raise WaveError(f"expect_handshake 的 at 时间不能是负数，收到的是 {at!r}")
-        if clock._edge_kind_at(raw_t) == edge:
-            edge_t = raw_t
-        elif clock.tco > 0 and raw_t - clock.tco >= 0 and clock._edge_kind_at(raw_t - clock.tco) == edge:
-            edge_t = raw_t - clock.tco
+        if (
+            isinstance(at, (Event, Wait))
+            and at._edge_clock is clock
+            and at._edge_time is not None
+            and clock._edge_kind_at(at._edge_time) == edge
+        ):
+            edge_t = at._edge_time
         else:
-            label = "上升" if edge == "rise" else "下降"
-            raise WaveError(f'{format_time(raw_t, d.timescale)} 不是时钟 "{clock.name}" 的有效{label}沿')
+            raw_t = d._resolve(at)
+            if raw_t < 0:
+                raise WaveError(f"expect_handshake 的 at 时间不能是负数，收到的是 {at!r}")
+            if clock._edge_kind_at(raw_t) == edge:
+                edge_t = raw_t
+            elif clock.tco > 0 and raw_t - clock.tco >= 0 and clock._edge_kind_at(raw_t - clock.tco) == edge:
+                edge_t = raw_t - clock.tco
+            else:
+                label = "上升" if edge == "rise" else "下降"
+                raise WaveError(f'{format_time(raw_t, d.timescale)} 不是时钟 "{clock.name}" 的有效{label}沿')
+
+        if not include_gaps:
+            end = d.end
+            visible = TimeMap(0.0, 1.0, _merge_gaps(d.gaps, end), end).visible()
+            if edge_t < end and not any(a <= edge_t <= b for a, b in visible):
+                raise WaveError(
+                    f'{format_time(edge_t, d.timescale)} 位于 gap 省略区间内（如确实要断言该拍，请传 include_gaps=True）'
+                )
 
         v_before = v_sig.value_before(edge_t)
         r_before = r_sig.value_before(edge_t)
@@ -174,8 +204,8 @@ def expect_handshake(
             idx = _edge_index(clock, edge, edge_t)
             sym = "↑" if edge == "rise" else "↓"
             t_str = format_time(edge_t, d.timescale)
-            v_after = v_sig.value_at(edge_t)
-            r_after = r_sig.value_at(edge_t)
+            v_after = _value_after_edge(d, clock, edge_t, v_sig)
+            r_after = _value_after_edge(d, clock, edge_t, r_sig)
             hints: list[str] = []
             if not v_ok and type(v_after) is type(v_val) and v_after == v_val:
                 hints.append(f'"{v_sig.name}" 在该沿才刚变为 {v_sig.display(v_after)}，要到下一拍才会被采样')
@@ -270,9 +300,14 @@ def to_dict(
             f'总线截断：{item["signal"]}@{item["start"]}~{item["end"]} 值 "{item["value"]}" 被截断为 "{item["shown"]}"'
         )
     for item in stats.dropped_labels:
-        layout_issues.append(
-            f'总线丢字：{item["signal"]}@{item["start"]}~{item["end"]} 值 "{item["value"]}" 因分段过窄未能显示'
-        )
+        if item.get("reason") == "inside_gap":
+            layout_issues.append(
+                f'总线丢字：{item["signal"]}@{item["start"]}~{item["end"]} 值 "{item["value"]}" 完全落在 gap 省略区间内未能显示'
+            )
+        else:
+            layout_issues.append(
+                f'总线丢字：{item["signal"]}@{item["start"]}~{item["end"]} 值 "{item["value"]}" 因分段过窄未能显示'
+            )
     for item in stats.crowded_arrows:
         layout_issues.append(
             f'箭头拥挤：{item["src"]} → {item["dst"]} "{item["label"]}" 与其他文字存在 {item["overlaps"]} 处重叠'

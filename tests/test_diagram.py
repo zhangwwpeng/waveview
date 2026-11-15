@@ -482,8 +482,8 @@ def test_clock_and_wait_tco_delay_semantics():
 
     # Sampling at clock rising edges still sees registered behavior properly:
     samples = d.sample(clk)
-    assert samples[0]["signals"]["q"] == {"sampled": "0", "after": "0", "changed": False}
-    assert samples[1]["signals"]["q"] == {"sampled": "1", "after": "1", "changed": False}
+    assert samples[0]["signals"]["q"] == {"sampled": "0", "after": "1", "changed": True}
+    assert samples[1]["signals"]["q"] == {"sampled": "1", "after": "0", "changed": True}
     assert samples[2]["signals"]["q"] == {"sampled": "1", "after": "1", "changed": False}
 
     # Validation errors on tco
@@ -554,3 +554,106 @@ def test_bus_pad_and_diagram_max_width():
             Diagram(width=bad_width)  # type: ignore[arg-type]
     with pytest.raises(WaveError, match="不能同时指定"):
         Diagram(width=900, px_per_ns=8)
+
+
+def test_assign_is_atomic_on_error_and_allows_self_signal():
+    d, clk, req, data = make()
+    with pytest.raises(WaveError, match="不存在"):
+        d.set(req=1, nosuch=1)
+    assert req.changes == []
+    assert d.steps == []
+
+    # Retrying at the same instant after failed partial call succeeds cleanly.
+    d.set(req=1)
+    assert req.value_at(0) == 1
+
+    # Signal named `self` can be assigned via both d.set() and Wait.__call__().
+    s = d.wire("self", init=0)
+    e0 = d.set(self=1)
+    e1 = d.posedge(clk)(self=0)
+    assert s.value_at(0) == 1
+    assert e0.self.time == 0
+    assert s.value_at(10 * NS) == 0
+    assert e1.self.time == 10 * NS
+
+
+def test_per_wait_tco_upper_bound_and_label_validation():
+    d, clk, req, _ = make()
+    with pytest.raises(WaveError, match="周期"):
+        d.posedge(clk, tco="10ns")
+    with pytest.raises(WaveError, match="周期"):
+        d.negedge(clk, tco="15ns")
+
+    with pytest.raises(WaveError, match="字符串"):
+        Diagram(title=123)  # type: ignore[arg-type]
+    with pytest.raises(WaveError, match="控制字符"):
+        Diagram(title="bad\x00title")
+    with pytest.raises(WaveError, match="字符串"):
+        d.wire("bad_w", label=7)  # type: ignore[arg-type]
+    with pytest.raises(WaveError, match="非空"):
+        d.bus("bad_b", label="   ")
+    with pytest.raises(WaveError, match="字符串"):
+        d.clock("bad_c", period="10ns", label=42)  # type: ignore[arg-type]
+    with pytest.raises(WaveError, match="控制字符"):
+        d.group("bad\x01grp").__enter__()
+    e = d.posedge(clk)(req=1)
+    e2 = d.posedge(clk)(req=0)
+    with pytest.raises(WaveError, match="字符串"):
+        d.marker(e, label=99)  # type: ignore[arg-type]
+    with pytest.raises(WaveError, match="字符串"):
+        d.region(req, e, e2, label=99)  # type: ignore[arg-type]
+    with pytest.raises(WaveError, match="字符串"):
+        d.measure(e, e2, label=99)  # type: ignore[arg-type]
+    with pytest.raises(WaveError, match="字符串"):
+        d.arrow(e.req, e2.req, label=99)  # type: ignore[arg-type]
+    with pytest.raises(WaveError, match="控制字符"):
+        d.note(e.req, "bad\x00note")
+    with pytest.raises(WaveError, match="控制字符"):
+        d.caption("bad\x07cap")
+
+
+def test_p3_api_consistency():
+    # 1. Instant.started tracks cursor initialization; d.at() accepts TimeRef while delay/gap reject it.
+    d, clk, req, data = make()
+    assert d.now.started is False
+    assert "unstarted" in repr(d.now)
+    e0 = d.set(req=1)
+    assert d.now.started is True
+    assert repr(d.now) == "Instant(0ns)"
+    d.at(clk.posedge(3))(req=0)
+    assert req.value_at(20 * NS) == 0
+    with pytest.warns(UserWarning, match="往回走了"):
+        d.at(e0)
+    with pytest.raises(WaveError, match=r"d\.at"):
+        d.delay(e0)  # type: ignore[arg-type]
+    with pytest.raises(WaveError, match=r"d\.at"):
+        d.gap(clk.posedge(2))  # type: ignore[arg-type]
+
+    # 2. Leading underscore rejected for signal/clock identifiers.
+    with pytest.raises(WaveError, match="Event 内部属性"):
+        d.wire("_priv")
+    with pytest.raises(WaveError, match="Event 内部属性"):
+        d.clock("_clk", period="10ns")
+
+    # 3. Calling enable(at > 0) on non-gated clock emits WaveWarning.
+    d_ungated = Diagram()
+    clk_u = d_ungated.clock("clk", period="10ns")
+    with pytest.warns(UserWarning, match="未设 gated=True"):
+        clk_u.enable("20ns")
+
+    # 4. Bus radix string literals parse like ints, check width, and coalesce with int values.
+    d_bus = Diagram(warn_noop=False)
+    c_bus = d_bus.clock("clk", period="10ns")
+    b8 = d_bus.bus("b8", init="x", width=8)
+    d_bus.posedge(c_bus)(b8="0xA5")
+    d_bus.posedge(c_bus)(b8=0xA5)
+    d_bus.posedge(c_bus)(b8="0b00001010")
+    assert b8.value_at(0) == 0xA5
+    assert len(b8.segments(d_bus.end)) == 2  # [0..20ns)=0xA5, [20ns..end)=0x0A
+    assert "0xA5→0xA5" not in d_bus.describe()
+    with pytest.raises(WaveError, match="8 位"):
+        d_bus.posedge(c_bus)(b8="0x100")
+    with pytest.raises(WaveError, match="缺少数字"):
+        d_bus.posedge(c_bus)(b8="0x")
+    d_bus.posedge(c_bus)(b8="IDLE")
+    assert b8.value_at(50 * NS) == "IDLE"

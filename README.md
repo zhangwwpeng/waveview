@@ -33,7 +33,7 @@ print(d.describe())
   - 支持 `start`/`stop`/`gated` 与 `idle=0|1`，以及在时间流中动态调用 `clk.enable()` / `clk.disable()`（适配 SPI `SCLK`、I2C `SCL` 等）
 - **完整的数字信号与分组**：
   - `wire` 支持 `0`、`1`、`"x"`（不定态斜线填充）、`"z"`（高阻中心虚线）
-  - `bus` 支持自动位宽校验、`hex`/`dec`/`bin` 格式化（可用 `pad=False` 省略前导零），或任意状态名字符串；支持 `Diagram(..., width=900)` 自适应目标画布宽（保留不截断硬约束并在 `width_drivers` 中报告撑宽原因），或按段宽自动展宽（默认上限 `max_width=2400`，可传 `None` 放开）
+  - `bus` 支持自动位宽校验（含 `"0x..."` / `"0b..."` 字符串字面量等价解析与 `0x...` 整数一致判等）、`hex`/`dec`/`bin` 格式化（可用 `pad=False` 省略前导零），或任意状态名字符串；支持 `Diagram(..., width=900)` 自适应目标画布宽（保留不截断硬约束并在 `width_drivers` 中报告撑宽原因），或按段宽自动展宽（总宽度默认上限 `max_width=2400`，可传 `None` 放开）
   - `with d.group("名称"):` 支持多级嵌套左侧括号分组
 - **丰富的标注与自动防重叠排版**：
   - `d.arrow(src, dst, "...")`：因果曲线箭头（支持信号跳变 `e1.valid`、时钟锚点 `clk.posedge(2)` 及 `(row, TimeRef)` 二元组如 `(ready, e_hs)`），自动避让总线值、高亮标注与其他箭头文字
@@ -89,7 +89,7 @@ waveview render examples/apb.py -o out/apb.svg
 
 - **Python 编程核对**：任意 `Diagram` 支持 `d.sample("clk")`（返回每个有效边沿的 `sampled`→`after` 寄存器采样变化）、`d.handshakes(...)` / `d.expect_handshake(...)` / `d.expect_stable(...)` 协议断言、`d.to_dict()` 和 `d.inspect("text" | "json")`。
 - **内置 Skill**：见 [skills/waveview/SKILL.md](skills/waveview/SKILL.md)。
-- **omp TUI 渲染插件**：见 [extensions/waveview.ts](extensions/waveview.ts)（通过 `omp install github:zhangwwpeng/waveview` 或本机 `omp plugin link .` 安装，将回复中的 `python_wave` 代码块内联渲染为 SVG）。
+- **omp TUI 渲染插件**：见 [extensions/waveview.ts](extensions/waveview.ts)（通过 `omp install github:zhangwwpeng/waveview` 或本机 `omp plugin link .` 安装，默认开启，将回复中的 ```` ```python_wave ```` / ```` ~~~python_wave ```` 代码块内联渲染为 SVG；子进程在系统临时目录、裁剪环境变量与超时保护下运行，设 `WAVEVIEW_DISABLE=1` 可临时关闭）。
 
 ## 文档导航
 

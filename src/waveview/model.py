@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from fractions import Fraction
 from typing import Any, Literal
 
-from .errors import WaveError
+from .errors import WaveError, warn
 
 Value = int | str  # wire: 0 / 1 / "x" / "z"; bus: int, label, "x" / "z"
 EdgeKind = Literal["rise", "fall"]
@@ -110,6 +110,15 @@ class Clock:
         """Enable this clock from ``at`` (defaults to the current cursor) onwards."""
         t = self._resolve_time(at)
         if not self._gated:
+            if t > 0:
+                from .units import format_time
+
+                ts = self._diagram.timescale if self._diagram is not None else "ns"
+                t_str = format_time(t, ts)
+                warn(
+                    f'时钟 "{self.name}" 声明时未设 gated=True，调用 enable({t_str}) '
+                    f"会将 {t_str} 之前的时钟沿全部屏蔽（建议在 clock() 中加上 gated=True）"
+                )
             self._gated = True
             self.windows = [(t, None)]
         else:
@@ -428,6 +437,8 @@ class Step:
     time: Fraction
     cause: str
     changes: list[tuple[Signal, Value, Value]]  # signal, old, new
+    edge_clock: Clock | None = None
+    edge_time: Fraction | None = None
 
 
 Annotation = Arrow | Region | Marker | Measure | Note

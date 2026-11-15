@@ -9,13 +9,16 @@
 from __future__ import annotations
 
 import difflib
+import itertools
 import keyword
 import math
 import os
+import re
+from collections.abc import Generator
 from contextlib import contextmanager
 from fractions import Fraction
 from pathlib import Path
-from typing import Any, Generator, Literal
+from typing import Any, Literal
 
 from .errors import WaveError, warn
 from .model import (
@@ -40,19 +43,29 @@ from .units import TIME_UNITS, format_time, parse_freq, parse_phase, parse_time
 class Instant:
     """A bare point in time, as returned by ``d.now``."""
 
-    def __init__(self, time: Fraction):
+    def __init__(self, time: Fraction, *, started: bool = True):
         self._time = time
+        self.started = started
 
     def __repr__(self) -> str:
-        return f"Instant({format_time(self._time)})"
+        t_str = format_time(self._time)
+        return f"Instant({t_str})" if self.started else f"Instant({t_str}, unstarted)"
 
 
 class Event:
     """What one assignment did: ``e.req`` is req's transition at that instant."""
 
-    def __init__(self, time: Fraction, signals: dict[str, Signal]):
+    def __init__(
+        self,
+        time: Fraction,
+        signals: dict[str, Signal],
+        edge_clock: Clock | None = None,
+        edge_time: Fraction | None = None,
+    ):
         self._time = time
         self._signals = signals
+        self._edge_clock = edge_clock
+        self._edge_time = edge_time
 
     def __contains__(self, item: object) -> bool:
         if isinstance(item, Signal):
@@ -86,13 +99,28 @@ class Event:
 class Wait:
     """Where a wait statement landed. Call it to assign at that instant."""
 
-    def __init__(self, diagram: Diagram, time: Fraction, cause: str):
+    def __init__(
+        self,
+        diagram: Diagram,
+        time: Fraction,
+        cause: str,
+        edge_clock: Clock | None = None,
+        edge_time: Fraction | None = None,
+    ):
         self._diagram = diagram
         self._time = time
         self._cause = cause
+        self._edge_clock = edge_clock
+        self._edge_time = edge_time
 
-    def __call__(self, **values: Value) -> Event:
-        return self._diagram._assign(self._time, self._cause, values)
+    def __call__(self, /, **values: Value) -> Event:
+        return self._diagram._assign(
+            self._time,
+            self._cause,
+            values,
+            edge_clock=self._edge_clock,
+            edge_time=self._edge_time,
+        )
 
     def __getattr__(self, name: str) -> Point:
         if name.startswith("_"):
@@ -110,6 +138,36 @@ TimeRef = Event | Point | Instant | Wait | str | int | float | Fraction
 PointRef = Point | tuple[Row | str, TimeRef]
 
 
+_XML_CTRL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+_INT_LITERAL_RE = re.compile(r"^[+-]?0(?:[xX][0-9a-fA-F_]+|[bB][01_]+|[oO][0-7_]+)$")
+_EMPTY_RADIX_RE = re.compile(r"^[+-]?0[xXbBoO]$")
+_DIAGRAM_SEQ = itertools.count(1)
+
+
+def _check_text(value: object, what: str) -> str:
+    if not isinstance(value, str):
+        raise WaveError(f"{what}必须是字符串，收到的是 {value!r}")
+    if _XML_CTRL_RE.search(value):
+        raise WaveError(f"{what}不能包含控制字符：{value!r}")
+    return value
+
+
+def _clean_opt_label(value: object, what: str) -> str | None:
+    if value is None:
+        return None
+    cleaned = re.sub(r"[\r\n\t]+", " ", _check_text(value, what)).strip()
+    return cleaned or None
+
+
+def _clean_req_label(value: object, default: str, what: str) -> str:
+    if value is None:
+        return default
+    cleaned = re.sub(r"[\r\n\t]+", " ", _check_text(value, what)).strip()
+    if not cleaned:
+        raise WaveError(f"{what}必须是非空字符串")
+    return cleaned
+
+
 def _positive_finite(value: object, name: str) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float, Fraction)):
         raise WaveError(f"{name} 必须是有限正数，收到的是 {value!r}")
@@ -124,13 +182,14 @@ class Diagram:
         self,
         title: str | None = None,
         timescale: str = "ns",
-        end: str | int | float | None = None,
+        end: str | int | float | Fraction | None = None,
         theme: str = "light",
         px_per_ns: float | None = None,
         warn_noop: bool = True,
         max_width: float | None = 2400.0,
         width: float | None = None,
     ):
+        self._seq = next(_DIAGRAM_SEQ)
         if timescale not in TIME_UNITS:
             raise WaveError(f'timescale "{timescale}" 不认识，可用：{", ".join(TIME_UNITS)}')
         if theme not in THEMES:
@@ -146,7 +205,7 @@ class Diagram:
             )
         if max_width is not None:
             max_width = _positive_finite(max_width, "max_width")
-        self.title = title
+        self.title = _clean_opt_label(title, "title ")
         self.timescale = timescale
         self.theme = theme
         self.px_per_ns = px_per_ns
@@ -167,6 +226,8 @@ class Diagram:
         self._groups: list[str] = []
         self._now: Fraction | None = None  # None: before time 0
         self._cause = "初始"
+        self._edge_clock: Clock | None = None
+        self._edge_time: Fraction | None = None
 
     # ---- declarations -------------------------------------------------
 
@@ -175,6 +236,12 @@ class Diagram:
             raise WaveError(
                 f"名字 {name!r} 不是合法的 Python 标识符；"
                 f'需要显示特殊字符时用 label，比如 d.bus("data", label="data[7:0]")'
+            )
+        if name.startswith("_"):
+            hint_name = name.lstrip("_") or "sig"
+            raise WaveError(
+                f'名字 {name!r} 不能以下划线 "_" 开头（会与 Event 内部属性冲突）；'
+                f'需要显示下划线前缀时请用 label，比如 d.wire("{hint_name}", label={name!r})'
             )
         if name in self._names:
             raise WaveError(f'名字 "{name}" 已经声明过了')
@@ -229,9 +296,10 @@ class Diagram:
         if s_t is not None or e_t is not None:
             windows = [(s_bound, e_t)]
 
+        clk_label = _clean_req_label(label, name, f'时钟 "{name}" 的 label ')
         clk = Clock(
             name,
-            label or name,
+            clk_label,
             p,
             ph,
             d,
@@ -248,7 +316,8 @@ class Diagram:
 
     def wire(self, name: str, init: Value = "x", label: str | None = None) -> Signal:
         self._declare(name)
-        sig = Signal(name, label or name, "wire", "x", groups=tuple(self._groups), _diagram=self)
+        sig_label = _clean_req_label(label, name, f'信号 "{name}" 的 label ')
+        sig = Signal(name, sig_label, "wire", "x", groups=tuple(self._groups), _diagram=self)
         sig.init = self._normalise(sig, init)
         self.rows.append(sig)
         self._names[name] = sig
@@ -270,9 +339,10 @@ class Diagram:
             raise WaveError(f'总线 "{name}"：fmt 只能是 "hex"、"dec" 或 "bin"')
         if not isinstance(pad, bool):
             raise WaveError(f'总线 "{name}"：pad 必须是布尔值，收到的是 {pad!r}')
+        sig_label = _clean_req_label(label, name, f'总线 "{name}" 的 label ')
         sig = Signal(
             name,
-            label or name,
+            sig_label,
             "bus",
             "x",
             width,
@@ -288,9 +358,10 @@ class Diagram:
 
     @contextmanager
     def group(self, name: str) -> Generator[None]:
-        if not isinstance(name, str) or not name.strip():
+        cleaned = re.sub(r"[\r\n\t]+", " ", _check_text(name, "分组名称 ")).strip() if isinstance(name, str) else ""
+        if not isinstance(name, str) or not cleaned:
             raise WaveError(f"分组名称必须是非空字符串，收到的是 {name!r}")
-        self._groups.append(name)
+        self._groups.append(cleaned)
         try:
             yield
         finally:
@@ -300,7 +371,7 @@ class Diagram:
 
     @property
     def now(self) -> Instant:
-        return Instant(self._now or Fraction(0))
+        return Instant(self._now or Fraction(0), started=self._now is not None)
 
     def _clock(self, clk: Clock | str) -> Clock:
         if isinstance(clk, str):
@@ -332,14 +403,21 @@ class Diagram:
             dt = self._time(tco)
             if dt < 0:
                 raise WaveError(f"tco 不能是负数，收到的是 {tco!r}")
+            if dt >= clk.period:
+                raise WaveError(
+                    f'tco 必须小于时钟 "{clk.name}" 的周期 {format_time(clk.period, self.timescale)}，收到的是 {tco!r}'
+                )
         now, index = self._now, 0
         for _ in range(n):
             now, index = clk.next_edge(kind, now)
+        assert now is not None
         self._now = now + dt
+        self._edge_clock = clk
+        self._edge_time = now
         self._cause = f"{clk.name}{'↑' if kind == 'rise' else '↓'}#{index}"
         if dt > 0:
             self._cause += f"+{format_time(dt, self.timescale)}"
-        return Wait(self, self._now, self._cause)
+        return Wait(self, self._now, self._cause, edge_clock=clk, edge_time=now)
 
     def posedge(
         self,
@@ -361,45 +439,67 @@ class Diagram:
         """@(negedge clk); ``n`` > 1 is repeat(n) @(negedge clk)."""
         return self._edge(clk, n, "fall", tco=tco)
 
-    def delay(self, t: str | int | float) -> Wait:
+    def _duration(self, t: object, what: str) -> Fraction:
+        if isinstance(t, (Event, Point, Instant, Wait)):
+            raise WaveError(f"{what} 需要持续时间而非时间点，跳到指定时刻请用 d.at(...)")
+        if isinstance(t, bool) or not isinstance(t, (str, int, float, Fraction)):
+            raise WaveError(f"{what} 需要持续时间（如 '10ns' 或数字），收到的是 {t!r}")
+        return self._time(t)
+
+    def delay(self, t: str | int | float | Fraction) -> Wait:
         """#t: move the cursor forward by ``t``."""
-        dt = self._time(t)
+        dt = self._duration(t, "delay")
         if dt < 0:
             raise WaveError(f"delay 不能是负数，收到的是 {t!r}")
         self._now = (self._now or Fraction(0)) + dt
+        self._edge_clock = None
+        self._edge_time = None
         self._cause = f"+{format_time(dt, self.timescale)}"
         return Wait(self, self._now, self._cause)
 
-    def at(self, t: str | int | float) -> Wait:
-        """Jump to an absolute time, e.g. for an asynchronous reset."""
-        target = self._time(t)
+    def at(self, t: TimeRef) -> Wait:
+        """Jump to an absolute time (or ``TimeRef``), e.g. for an asynchronous reset."""
+        target = self._resolve(t)
         if target < 0:
             raise WaveError(f"时间不能是负数，收到的是 {t!r}")
+        t_str = format_time(target, self.timescale)
         if self._now is not None and target < self._now:
             warn(
-                f"d.at({t!r}) 让时间从 {format_time(self._now, self.timescale)} 往回走了；"
+                f"d.at({t_str}) 让时间从 {format_time(self._now, self.timescale)} 往回走了；"
                 "图照样能画，但请确认这是有意的"
             )
         self._now = target
-        self._cause = f"@{format_time(target, self.timescale)}"
+        self._edge_clock = None
+        self._edge_time = None
+        self._cause = f"@{t_str}"
         return Wait(self, self._now, self._cause)
 
-    def gap(self, t: str | int | float) -> Wait:
+    def gap(self, t: str | int | float | Fraction) -> Wait:
         """Like delay(t), but the interval is drawn squeezed into a break mark."""
-        dt = self._time(t)
+        dt = self._duration(t, "gap")
         if dt <= 0:
             raise WaveError(f"gap 必须大于 0，收到的是 {t!r}")
         start = self._now or Fraction(0)
         self.gaps.append(Gap(start, start + dt))
         self._now = start + dt
+        self._edge_clock = None
+        self._edge_time = None
         self._cause = f"+{format_time(dt, self.timescale)}（省略）"
         return Wait(self, self._now, self._cause)
 
-    def set(self, **values: Value) -> Event:
+    def set(self, /, **values: Value) -> Event:
         """Assign at the current time: ``d.set(req=1, data="0xA5")``."""
         if self._now is None:
             self._now = Fraction(0)
-        return self._assign(self._now, self._cause, values)
+            self._edge_clock = None
+            self._edge_time = None
+        return self._assign(
+            self._now,
+            self._cause,
+            values,
+            edge_clock=self._edge_clock,
+            edge_time=self._edge_time,
+        )
 
     # ---- assignment ---------------------------------------------------
 
@@ -440,6 +540,18 @@ class Diagram:
             raise WaveError(f'wire "{sig.name}" 的值只能是 0、1、"x"、"z"，收到的是 {value!r}')
         if isinstance(value, bool) or isinstance(value, float):
             raise WaveError(f'总线 "{sig.name}" 的值要写成整数或字符串，收到的是 {value!r}')
+        if isinstance(value, str):
+            _check_text(value, f'总线 "{sig.name}" 的值 ')
+            s = value.strip()
+            if _EMPTY_RADIX_RE.fullmatch(s):
+                raise WaveError(f'总线 "{sig.name}" 的进制字面量 {value!r} 缺少数字')
+            if _INT_LITERAL_RE.fullmatch(s):
+                try:
+                    value = int(s, 0)
+                except ValueError as exc:
+                    raise WaveError(f'总线 "{sig.name}" 的进制字面量 {value!r} 格式无效') from exc
+            else:
+                return value
         if isinstance(value, int):
             if value < 0:
                 raise WaveError(f'总线 "{sig.name}" 的整数值不能是负数，收到的是 {value}')
@@ -448,15 +560,20 @@ class Diagram:
                     f'总线 "{sig.name}" 是 {sig.width} 位，装不下 {value}（{hex(value)}）'
                 )
             return value
-        if isinstance(value, str):
-            return value
         raise WaveError(f'总线 "{sig.name}" 的值要写成整数或字符串，收到的是 {value!r}')
 
-    def _assign(self, t: Fraction, cause: str, values: dict[str, Value]) -> Event:
+    def _assign(
+        self,
+        t: Fraction,
+        cause: str,
+        values: dict[str, Value],
+        *,
+        edge_clock: Clock | None = None,
+        edge_time: Fraction | None = None,
+    ) -> Event:
         if not values:
             raise WaveError("赋值时至少要给一个信号，比如 d.set(req=1)")
-        signals: dict[str, Signal] = {}
-        changes = []
+        prepared: list[tuple[str, Signal, Value, Value]] = []
         for name, raw in values.items():
             sig = self._signal(name)
             value = self._normalise(sig, raw)
@@ -466,6 +583,11 @@ class Diagram:
                     "同一时刻不能赋值两次"
                 )
             old = sig.value_at(t)
+            prepared.append((name, sig, value, old))
+
+        signals: dict[str, Signal] = {}
+        changes = []
+        for name, sig, value, old in prepared:
             if old == value and self.warn_noop:
                 warn(
                     f'信号 "{name}" 在 {format_time(t, self.timescale)} 本来就是 {value!r}，'
@@ -474,8 +596,8 @@ class Diagram:
             sig.add(t, value)
             signals[name] = sig
             changes.append((sig, old, value))
-        self.steps.append(Step(t, cause, changes))
-        return Event(t, signals)
+        self.steps.append(Step(t, cause, changes, edge_clock=edge_clock, edge_time=edge_time))
+        return Event(t, signals, edge_clock=edge_clock, edge_time=edge_time)
 
     # ---- annotations --------------------------------------------------
 
@@ -534,7 +656,7 @@ class Diagram:
         p_dst = self._point_ref(dst, "终点")
         if p_src == p_dst:
             raise WaveError("箭头的起点和终点不能是同一个信号跳变")
-        self.annotations.append(Arrow(p_src, p_dst, label))
+        self.annotations.append(Arrow(p_src, p_dst, _clean_opt_label(label, "arrow 的 label ")))
 
     def region(self, row: Row | str, start: TimeRef, end: TimeRef, label: str | None = None) -> None:
         """Highlight ``row`` between ``start`` and ``end``."""
@@ -543,14 +665,15 @@ class Diagram:
             raise WaveError("region 的开始时间不能是负数")
         if b <= a:
             raise WaveError("region 的结束时间必须晚于开始时间")
-        self.annotations.append(Region(self._row(row), a, b, label))
+        cleaned = _clean_opt_label(label, "region 的 label ")
+        self.annotations.append(Region(self._row(row), a, b, cleaned))
 
     def marker(self, at: TimeRef | None = None, label: str | None = None) -> None:
         """A dashed vertical line across every row; ``at`` defaults to now."""
         t = (self._now or Fraction(0)) if at is None else self._resolve(at)
         if t < 0:
             raise WaveError("marker 的时间不能是负数")
-        self.annotations.append(Marker(t, label))
+        self.annotations.append(Marker(t, _clean_opt_label(label, "marker 的 label ")))
 
     def measure(self, start: TimeRef, end: TimeRef, label: str | None = None) -> None:
         """A dimension line between two instants."""
@@ -559,7 +682,7 @@ class Diagram:
             raise WaveError("measure 的开始时间不能是负数")
         if b <= a:
             raise WaveError("measure 的结束时间必须晚于开始时间")
-        self.annotations.append(Measure(a, b, label))
+        self.annotations.append(Measure(a, b, _clean_opt_label(label, "measure 的 label ")))
 
     def note(
         self,
@@ -571,13 +694,14 @@ class Diagram:
         if isinstance(target, Point):
             if text is not None:
                 raise WaveError('传入事件跳变点（如 e.sig）时它已自带时间，请直接写 d.note(e.sig, "说明")')
-            if not isinstance(text_or_at, str) or not text_or_at.strip():
+            note_text = _clean_opt_label(text_or_at, "note 的注释文字")
+            if note_text is None:
                 raise WaveError("note 的注释文字必须是非空字符串")
             if not any(r is target.signal for r in self.rows):
                 raise WaveError(f'note 的目标信号 "{target.signal.name}" 不属于当前图表')
             if target.time < 0:
                 raise WaveError("note 的时间不能是负数")
-            self.annotations.append(Note(target.signal, target.time, text_or_at.strip()))
+            self.annotations.append(Note(target.signal, target.time, note_text))
             return
 
         row = self._row(target)
@@ -586,12 +710,13 @@ class Diagram:
                 '在信号或时钟上添加 note 需要指定时间，例如 d.note(sig, d.now, "说明")，'
                 '或直接传跳变点 d.note(e.sig, "说明")'
             )
-        if not isinstance(text, str) or not text.strip():
+        note_text = _clean_opt_label(text, "note 的注释文字")
+        if note_text is None:
             raise WaveError("note 的注释文字必须是非空字符串")
         t = self._resolve(text_or_at)
         if t < 0:
             raise WaveError("note 的时间不能是负数")
-        self.annotations.append(Note(row, t, text.strip()))
+        self.annotations.append(Note(row, t, note_text))
 
     def caption(self, *texts: str) -> None:
         """Add one or more explanatory footer lines below the time axis."""
@@ -599,10 +724,9 @@ class Diagram:
             raise WaveError("caption 至少需要传入一条非空注释文字")
         added = 0
         for item in texts:
-            if not isinstance(item, str):
-                raise WaveError(f"caption 的内容必须是字符串，收到的是 {item!r}")
+            _check_text(item, "caption 的内容")
             for raw_line in item.splitlines():
-                line = raw_line.strip()
+                line = raw_line.replace("\t", " ").strip()
                 if line:
                     self.captions.append(line)
                     added += 1
@@ -677,7 +801,7 @@ class Diagram:
         *,
         edge: Literal["rise", "fall"] = "rise",
         active: Value = 1,
-        include_gaps: bool = True,
+        include_gaps: bool = False,
     ) -> list[dict[str, Any]]:
         """Return active clock edges where both ``valid`` and ``ready`` are sampled at ``active``."""
         from .inspect import find_handshakes
@@ -702,6 +826,7 @@ class Diagram:
         count: int | None = None,
         edge: Literal["rise", "fall"] = "rise",
         active: Value = 1,
+        include_gaps: bool = False,
     ) -> list[dict[str, Any]]:
         """Verify valid/ready handshake occurrence at ``at`` and/or total ``count``."""
         from .inspect import expect_handshake
@@ -715,6 +840,7 @@ class Diagram:
             count=count,
             edge=edge,
             active=active,
+            include_gaps=include_gaps,
         )
 
     def expect_stable(

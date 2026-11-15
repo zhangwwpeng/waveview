@@ -11,11 +11,22 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
+        python-version: ["3.12", "3.13"]
 
     runs-on: ${{ matrix.os }}
 
     steps:
       - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
 
       - name: Set up uv
         uses: astral-sh/setup-uv@v5
@@ -25,8 +36,17 @@ jobs:
       - name: Install dependencies
         run: uv sync --locked
 
+      - name: Run ruff
+        run: uvx ruff check src tests examples
+
+      - name: Run pyright
+        run: uvx pyright src
+
       - name: Run pytest
         run: uv run pytest
 
       - name: Strict CLI self-check
-        run: uv run waveview check examples/apb.py --strict
+        run: |
+          for f in examples/*.py; do
+            uv run waveview check "$f" --strict
+          done

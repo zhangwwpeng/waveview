@@ -21,7 +21,7 @@ d.arrow(e1.valid, (ready, e2), "handshake")     # src/dst: Point, clk.posedge(n)
 d.region(data, e1, e2, "burst"); d.marker(e2, "hs"); d.measure(e1, e2, "latency")
 d.note(clk, e2, "hs beat"); d.caption("Note 1: ...", "Note 2: ...")  # self-contained text footer
 
-d.expect_handshake(clk, valid, ready, at=e2, count=1)  # asserts sampled valid==1 && ready==1 on edge
+d.expect_handshake(clk, valid, ready, at=e2, count=1)  # asserts sampled valid==1 && ready==1 on visible edge (include_gaps=False)
 d.expect_stable(data, e1, e2, no_x=True)               # asserts unchanged & non-x/z over [start, end)
 ```
 
@@ -37,8 +37,8 @@ d.expect_stable(data, e1, e2, no_x=True)               # asserts unchanged & non
    - Pass **`Diagram(..., width=900)`** when you want a generous target canvas width (~850–950px) in a single pass instead of guessing `px_per_ns`. Hard constraints (clock `5px/half` readability floor, bus value fit without truncation, long `caption`/`title`/`note`/`marker`) may still widen the diagram beyond `width`, in which case `canvas.width_drivers` tells you exactly which bus segment or annotation drove the width.
    - Reserve `px_per_ns` for explicit zoom factors; `width` and `px_per_ns` are mutually exclusive (`WaveError`).
 4. **Event handles & anchors**:
-   - `e = d.posedge(clk)(valid=1)` only exposes signals assigned in *that* event (`e.ready` raises `WaveError`). Every `Event`, `Point`, `Wait`, `Instant`, or `clk.posedge(n)` works directly as `TimeRef` in `arrow`, `note`, `region`, `marker`, `measure`, `point`, and `(row, TimeRef)` tuples—never hardcode `"30ns"` when a handle exists.
-   - Use exact declared signal names (`d.wire("valid")` -> `valid=1`, never `v=1`), initialize signals in `init=` (never leave signals un-driven at default `"x"`), and note `d.posedge()`/`delay()`/`at()` return a `Wait` handle that must be called `(...)` to assign.
+   - `e = d.posedge(clk)(valid=1)` only exposes signals assigned in *that* event (`e.ready` raises `WaveError`). Every `Event`, `Point`, `Wait`, `Instant`, or `clk.posedge(n)` works directly as `TimeRef` in `d.at`, `arrow`, `note`, `region`, `marker`, `measure`, `point`, and `(row, TimeRef)` tuples—never hardcode `"30ns"` when a handle exists.
+   - Use exact declared signal names without a leading `_` (`d.wire("valid")` -> `valid=1`, never `v=1`; pass `label="_valid"` if a leading underscore should appear in labels), initialize signals in `init=` (never leave signals un-driven at default `"x"`), and note `d.posedge()`/`delay()`/`at()` return a `Wait` handle that must be called `(...)` to assign.
 
 ## TUI Reply Workflow (`python_wave`) & Self-Check
 

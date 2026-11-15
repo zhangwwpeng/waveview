@@ -9,7 +9,7 @@ from fractions import Fraction
 from typing import TYPE_CHECKING, Any
 
 from .model import Arrow, Clock, Gap, Marker, Measure, Note, Region, Row, Signal, Value
-from .units import TIME_UNITS, format_time
+from .units import format_time
 
 if TYPE_CHECKING:
     from .diagram import Diagram
@@ -40,6 +40,10 @@ VALUE_SIZE = 11
 CAPTION_SIZE = 11
 CAPTION_LINE_H = 18
 CAPTION_TOP_GAP = 10
+BUS_LABEL_HALF_H = 7.5
+BADGE_HALF_H = 7.1
+NEAR_PAD_X = 10.0
+NEAR_PAD_Y = round((ROW_H - 2 * BUS_LABEL_HALF_H - 2 * BADGE_HALF_H) / 2 - 0.6, 2)
 
 _WIDE_SYMBOLS = frozenset("←→↑↓↔⇒⇐…—–")
 
@@ -53,10 +57,10 @@ def text_width(s: str, size: float, mono: bool = False) -> float:
             w += size * 1.04
         elif ch in _WIDE_SYMBOLS:
             w += size * 0.95
-        elif ch == " ":
-            w += size * 0.34
         elif mono:
             w += size * 0.61
+        elif ch == " ":
+            w += size * 0.34
         else:
             w += size * (0.63 if ch.isupper() or ch.isdigit() else 0.55)
     return w
@@ -215,7 +219,7 @@ def _resolve_scale(
     if d.width is not None:
         avail_wave_px = d.width - wave_base
         target_scale = (avail_wave_px / float(visible_span)) if (visible_span > 0 and avail_wave_px > 0) else 0.0
-        scale = max(target_scale, floor, bus_max_scale)
+        scale = max(target_scale, floor, bus_max_scale, 1e9 if visible_span <= 0 else 0.0)
         drivers: list[dict[str, Any]] = []
         floor_width = wave_base + float(visible_span) * floor
         if floor_width > d.width + 0.05:
@@ -237,8 +241,8 @@ def _resolve_scale(
     scale = max(default_scale, bus_max_scale)
     hit_cap = False
     drivers = []
-    if d.max_width is not None and span * scale > d.max_width:
-        cap_scale = d.max_width / span
+    if d.max_width is not None and wave_base + float(visible_span) * scale > d.max_width:
+        cap_scale = max(1.0, d.max_width - wave_base) / span
         if floor > cap_scale:
             drivers.append(
                 {
@@ -253,6 +257,8 @@ def _resolve_scale(
         drivers.sort(key=lambda item: item["min_width"], reverse=True)
         scale = max(cap_scale, floor)
         hit_cap = True
+    if visible_span <= 0:
+        scale = max(scale, 1e9)
     return scale, hit_cap, drivers
 
 
@@ -285,7 +291,7 @@ class RowBox:
 def _clamp_cx(cx: float, half_w: float, x0: float, x_end: float) -> float:
     if x_end - x0 >= half_w * 2 + 4:
         return min(max(cx, x0 + half_w + 2), x_end - half_w - 2)
-    return cx
+    return max(PAD + half_w, cx)
 
 
 def _wave_segments(
@@ -363,6 +369,25 @@ def _collides(cx: float, cy: float, hw: float, hh: float, obstacles: list[Box2D]
     return hits
 
 
+def _near_penalty(
+    cx: float,
+    cy: float,
+    hw: float,
+    hh: float,
+    obstacles: list[Box2D],
+    pad_x: float = NEAR_PAD_X,
+    pad_y: float = NEAR_PAD_Y,
+) -> float:
+    """Soft penalty for boxes that clear hard collision (4x3px) yet graze within pad_x x pad_y (<5.3px inter-row corridor)."""
+    penalty = 0.0
+    for ox, oy, ohw, ohh in obstacles:
+        gx = abs(cx - ox) - (hw + ohw)
+        gy = abs(cy - oy) - (hh + ohh)
+        if gx < pad_x and gy < pad_y:
+            penalty += (pad_x - gx) * (pad_y - gy)
+    return round(penalty, 2)
+
+
 @dataclass
 class DiagramLayout:
     end: Fraction
@@ -375,6 +400,7 @@ class DiagramLayout:
     width: float
     height: float
     title_y: float | None
+    markers_bottom: float
     rows_top: float
     rows_bottom: float
     lanes_top: float
@@ -430,7 +456,7 @@ def compute_layout(d: Diagram) -> DiagramLayout:
             marker_items.append((m, x, 0))
             continue
         half_w = text_width(m.label, 10.5) / 2 + 5.5
-        cx = max(x, 6.0 + half_w)
+        cx = max(x, PAD + half_w)
         lane_idx = 0
         while lane_idx < len(marker_lane_rights):
             if marker_lane_rights[lane_idx] + 6 <= cx - half_w:
@@ -448,6 +474,7 @@ def compute_layout(d: Diagram) -> DiagramLayout:
 
     measure_lanes: list[list[tuple[float, float]]] = []
     measure_items: list[tuple[Measure, int, float, float, float, str, bool]] = []
+    measure_right = 0.0
     for m in measures:
         x1 = tm.x(max(m.start, Fraction(0)))
         x2 = tm.x(min(m.end, end))
@@ -457,6 +484,7 @@ def compute_layout(d: Diagram) -> DiagramLayout:
         cx = _clamp_cx((x1 + x2) / 2, half_w, x0, x_end)
         occ_l = min(x1, cx - half_w)
         occ_r = max(x2, cx + half_w)
+        measure_right = max(measure_right, occ_r + PAD)
         lane_idx = 0
         while lane_idx < len(measure_lanes):
             if all(occ_r + 8 <= la or occ_l - 8 >= lb for la, lb in measure_lanes[lane_idx]):
@@ -473,6 +501,7 @@ def compute_layout(d: Diagram) -> DiagramLayout:
         title_y = y + 19
         y += TITLE_H
     y += marker_band_h
+    markers_bottom = y
     if d.rows and any(a.src.signal is a.dst.signal and a.src.signal is d.rows[0] for a in arrows):
         y += 14
     if d.rows and not d.rows[0].groups and any(n.row is d.rows[0] for n in notes):
@@ -529,12 +558,47 @@ def compute_layout(d: Diagram) -> DiagramLayout:
         if right > note_min_right:
             note_min_right = right
             widest_note = n
+    region_right = max(
+        (
+            _clamp_cx(
+                (tm.x(max(a.start, Fraction(0))) + tm.x(min(a.end, end))) / 2,
+                text_width(a.label, 10) / 2,
+                x0,
+                x_end,
+            )
+            + text_width(a.label, 10) / 2
+            + PAD
+            for a in regions
+            if a.label
+        ),
+        default=0.0,
+    )
+    arrow_right = max(
+        (
+            _clamp_cx(
+                (tm.x(a.src.time) + tm.x(a.dst.time)) / 2
+                + 0.35 * abs(tm.x(a.dst.time) - tm.x(a.src.time)),
+                text_width(a.label, 10.5) / 2 + 5.5,
+                x0,
+                x_end,
+            )
+            + text_width(a.label, 10.5) / 2
+            + 5.5
+            + PAD
+            for a in arrows
+            if a.label
+        ),
+        default=0.0,
+    )
     title_right = (PAD + text_width(d.title, 15.5) + PAD) if d.title else 0.0
     marker_right = (marker_max_right + PAD) if marker_max_right else 0.0
     width = max(
         x_end + PAD + 26,
         title_right,
         marker_right,
+        measure_right,
+        region_right,
+        arrow_right,
         caption_right,
         note_min_right,
     )
@@ -580,6 +644,7 @@ def compute_layout(d: Diagram) -> DiagramLayout:
         width=width,
         height=height,
         title_y=title_y,
+        markers_bottom=markers_bottom,
         rows_top=rows_top,
         rows_bottom=rows_bottom,
         lanes_top=lanes_top,

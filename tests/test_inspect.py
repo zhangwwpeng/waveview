@@ -460,13 +460,174 @@ def test_handshakes_expect_handshake_and_expect_stable():
     d_tco = Diagram("TCO Assertions")
     c_tco = d_tco.clock("clk", period="10ns", tco="1.5ns")
     v_tco = d_tco.wire("valid", init=0)
-    r_tco = d_tco.wire("ready", init=1)
-    d_tco.posedge(c_tco)                 # #1 1.5ns
-    d_tco.posedge(c_tco)(valid=1)        # #2 11.5ns
-    e_hs_tco = d_tco.posedge(c_tco)(valid=0)  # #3 21.5ns (clock edge @20ns)
+    r_tco = d_tco.wire("ready", init=0)
+    e_drive_tco = d_tco.posedge(c_tco)(valid=1)                 # #1 1.5ns (clock edge @0ns)
+    e_early_tco = d_tco.posedge(c_tco, tco="2.5ns")(ready=1)    # #2 12.5ns (clock edge @10ns)
+    e_hs_tco = d_tco.posedge(c_tco)(valid=0)                    # #3 21.5ns (clock edge @20ns)
+    samples_tco = d_tco.sample(c_tco)
+    assert samples_tco[0]["signals"]["valid"] == {"sampled": "0", "after": "1", "changed": True}
+    assert samples_tco[1]["signals"]["ready"] == {"sampled": "0", "after": "1", "changed": True}
+    assert samples_tco[2]["signals"]["valid"] == {"sampled": "1", "after": "0", "changed": True}
     assert d_tco.expect_handshake(c_tco, v_tco, r_tco, at=e_hs_tco, count=1) == [
         {"edge": 3, "time": "20ns", "time_s": 2e-08}
     ]
+    # Passing an event from a one-off `tco="2.5ns"` wait resolves back to clock edge #2 and gives 1-cycle hint.
+    with pytest.raises(WaveError, match=r"在该沿才刚变为.*#3\(20ns\)"):
+        d_tco.expect_handshake(c_tco, v_tco, r_tco, at=e_early_tco)
+
+
+def test_cli_handles_system_exit_as_error(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+):
+    bad_zero = "\n".join(
+        [
+            "import sys",
+            "from waveview import Diagram",
+            "d = Diagram()",
+            "d.clock('clk', period='10ns')",
+            "sys.exit(0)",
+        ]
+    )
+    monkeypatch.setattr("sys.stdin", io.StringIO(bad_zero))
+    assert cli_main(["check", "-"]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "SystemExit" in captured.err
+
+    bad_three = "\n".join(
+        [
+            "import sys",
+            "sys.exit(3)",
+        ]
+    )
+    monkeypatch.setattr("sys.stdin", io.StringIO(bad_three))
+    assert cli_main(["render", "-", "-o", str(tmp_path / "out.svg")]) == 1
+    assert "SystemExit" in capsys.readouterr().err
+
+    # Multi-block input still reports subsequent blocks even when block 1 calls sys.exit.
+    multi = "\n".join(
+        [
+            "```python_wave",
+            "import sys",
+            "sys.exit(0)",
+            "```",
+            "",
+            "```python_wave",
+            "from waveview import Diagram",
+            "d = Diagram(title='Second Block')",
+            "c = d.clock('clk', period='10ns')",
+            "req = d.wire('req', init=0)",
+            "d.posedge(c)(req=1)",
+            "```",
+        ]
+    )
+    monkeypatch.setattr("sys.stdin", io.StringIO(multi))
+    assert cli_main(["check", "-", "--format", "json"]) == 1
+    multi_cap = capsys.readouterr()
+    assert "SystemExit" in multi_cap.err
+    assert "Second Block" in multi_cap.out
+
+
+def test_dropped_bus_label_inside_gap_reported_in_inspect_and_stats():
+    import warnings
+
+    from waveview import Diagram
+    from waveview.inspect import to_dict
+    from waveview.svg import render_with_stats
+
+    d = Diagram(end="50ns")
+    d.bus("data", init="x")
+    d.at("12ns")(data=0xBEEF)
+    d.at("28ns")(data="x")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        d.at("10ns")
+    d.gap("20ns")  # hides [10ns, 30ns), completely swallowing 0xBEEF
+
+    _, stats = render_with_stats(d)
+    assert any(item["signal"] == "data" and item.get("reason") == "inside_gap" for item in stats.dropped_labels)
+
+    report = to_dict(d)
+    assert report["ok"] is False
+    assert any("完全落在 gap 省略区间内未能显示" in issue for issue in report["layout_issues"])
+
+
+def test_handshakes_skip_gaps_by_default_and_cli_p2_p3(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path):
+    from waveview import Diagram
+    from waveview.cli import _extract_blocks, main as cli_main
+    from waveview.errors import WaveError
+
+    # 1. handshakes() and expect_handshake() default include_gaps=False consistently with sample().
+    d = Diagram(end="50ns")
+    clk = d.clock("clk", period="10ns")
+    v = d.wire("valid", init=0)
+    r = d.wire("ready", init=0)
+    d.posedge(clk)(valid=1, ready=1)     # #1 0ns drives high
+    e_in_gap = d.posedge(clk)            # #2 10ns: edge INSIDE gap below (wait: [15ns, 35ns) hides 20ns & 30ns!)
+    d.at("15ns")
+    d.gap("20ns")                        # hides [15ns, 35ns) -> edge #3(20ns), #4(30ns)
+    e_vis = d.posedge(clk)               # #5 40ns (visible handshake)
+    assert [(h["edge"], h["time"]) for h in d.handshakes(clk, v, r)] == [(2, "10ns"), (5, "40ns")]
+    assert len(d.handshakes(clk, v, r, include_gaps=True)) == 4
+    d.expect_handshake(clk, v, r, at=e_vis, count=2)
+    with pytest.raises(WaveError, match="gap 省略区间内"):
+        d.expect_handshake(clk, v, r, at=clk.posedge(3))
+    assert len(d.expect_handshake(clk, v, r, at=clk.posedge(3), include_gaps=True)) == 4
+
+    # 2. _extract_blocks handles .py docstring fences, prose + python fence, tilde/indented fences, and empty .md.
+    py_with_doc = '"""Doc:\n```python_wave\nbroken()\n```\n"""\nd = Diagram()\n'
+    assert _extract_blocks(py_with_doc, "demo.py") == [("demo.py", py_with_doc)]
+
+    prose_then_py = "说明文本\n\n```python\nd = Diagram()\n```\n"
+    assert _extract_blocks(prose_then_py, "<stdin>") == [("<stdin>", "d = Diagram()\n")]
+
+    indented_tilde = "- bullet\n  ~~~python_wave\n  from waveview import Diagram\n  d = Diagram()\n  ~~~\n"
+    blocks = _extract_blocks(indented_tilde, "notes.md")
+    assert blocks == [("notes.md", "from waveview import Diagram\nd = Diagram()\n")]
+
+    with pytest.raises(WaveError, match="没有找到"):
+        _extract_blocks("# Just a title\n", "empty.md")
+
+    # 3. CLI selects last instantiated Diagram regardless of global insertion order.
+    order_script = "\n".join(
+        [
+            "from waveview import Diagram",
+            "x = None",
+            "y = Diagram(title='Second Created')",
+            "x = Diagram(title='First Variable Reassigned Last')",
+            "c = x.clock('clk', period='10ns'); w = x.wire('w', init=0); x.posedge(c)(w=1)",
+            "c2 = y.clock('clk', period='10ns'); w2 = y.wire('w', init=0); y.posedge(c2)(w=1)",
+        ]
+    )
+    # Wait: x was created after y even though key 'x' came first in globals!
+    monkeypatch.setattr("sys.stdin", io.StringIO(order_script))
+    assert cli_main(["check", "-", "--format", "json"]) == 0
+    out_text = capsys.readouterr().out
+    assert "First Variable Reassigned Last" in out_text
+
+    # 4. check reports subsequent valid blocks even when block 1 raises WaveError/SyntaxError.
+    multi_err = "\n".join(
+        [
+            "```python_wave",
+            "d = (  # intentional syntax error",
+            "```",
+            "",
+            "```python_wave",
+            "from waveview import Diagram",
+            "d = Diagram(title='Block Two Recovered')",
+            "c = d.clock('clk', period='10ns')",
+            "req = d.wire('req', init=0)",
+            "d.posedge(c)(req=1)",
+            "```",
+        ]
+    )
+    monkeypatch.setattr("sys.stdin", io.StringIO(multi_err))
+    assert cli_main(["check", "-", "--format", "json"]) == 1
+    err_cap = capsys.readouterr()
+    assert "SyntaxError" in err_cap.err
+    assert "Block Two Recovered" in err_cap.out
 
 
 def test_target_width_and_width_drivers():

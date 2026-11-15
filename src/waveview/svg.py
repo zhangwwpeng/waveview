@@ -8,7 +8,8 @@ from html import escape
 from typing import TYPE_CHECKING
 
 from .layout import (
-    AXIS_H,
+    BADGE_HALF_H,
+    BUS_LABEL_HALF_H,
     CAPTION_LINE_H,
     CAPTION_SIZE,
     GAP_W,
@@ -31,7 +32,7 @@ from .layout import (
     _clamp_cx,
     _collides,
     _is_dark,
-    _merge_gaps,
+    _near_penalty,
     _nice_step,
     _ribbon_path,
     compute_layout,
@@ -197,7 +198,7 @@ def render_with_stats(d: Diagram) -> tuple[str, RenderStats]:
 
     # ---- marker label boxes (for region/note collision checks) ----
     marker_labels: list[Box2D] = [
-        (cx, (rows_top - 8 - lane_idx * 20) - 1.8, text_width(m.label, 10.5) / 2 + 5.5, 7.1)
+        (cx, (lay.markers_bottom - 8 - lane_idx * 20) - 1.8, text_width(m.label, 10.5) / 2 + 5.5, BADGE_HALF_H)
         for m, cx, lane_idx in lay.marker_items
         if m.label
     ]
@@ -240,20 +241,35 @@ def render_with_stats(d: Diagram) -> tuple[str, RenderStats]:
             )
 
     # ---- axis ticks ----
-    unit = TIME_UNITS[d.timescale]
-    step = _nice_step(40 / lay.scale / float(unit)) * float(unit)
-    step_f = Fraction(str(step))
-    step_in_unit = float(step_f / unit)
-    tick_digits = max(3, -math.floor(math.log10(step_in_unit)) + 1) if step_in_unit > 0 else 3
-    for a, b in tm.visible():
-        k = math.ceil(a / step_f)
-        while (t := k * step_f) <= b:
-            x = tm.x(t)
-            if not any(abs(x - tm.x(g.start)) < 14 or abs(x - tm.x(g.end)) < 14 for g in lay.gaps) or t == a:
-                cv.line(x, axis_y, x, axis_y + 4, c["muted"], width=1)
-                label = format_time(t, d.timescale, digits=tick_digits)[: -len(d.timescale)]
-                cv.text(x, axis_y + 16, label, c["muted"], size=10, anchor="middle", mono=True)
-            k += 1
+    if lay.scale > 0 and tm.visible():
+        unit = TIME_UNITS[d.timescale]
+        step = _nice_step(40 / lay.scale / float(unit)) * float(unit)
+        step_f = Fraction(str(step))
+        step_in_unit = float(step_f / unit)
+        tick_digits = max(3, -math.floor(math.log10(step_in_unit)) + 1) if step_in_unit > 0 else 3
+        last_tick = math.floor(end / step_f) * step_f
+        sample_ticks = [t for t in (last_tick, last_tick - step_f) if t >= 0]
+        need_px = (
+            max(
+                text_width(format_time(t, d.timescale, digits=tick_digits)[: -len(d.timescale)], 10, mono=True)
+                for t in sample_ticks
+            )
+            + 6.0
+        )
+        if float(step_f) * lay.scale < need_px:
+            step = _nice_step(need_px / lay.scale / float(unit)) * float(unit)
+            step_f = Fraction(str(step))
+            step_in_unit = float(step_f / unit)
+            tick_digits = max(3, -math.floor(math.log10(step_in_unit)) + 1) if step_in_unit > 0 else 3
+        for a, b in tm.visible():
+            k = math.ceil(a / step_f)
+            while (t := k * step_f) <= b:
+                x = tm.x(t)
+                if not any(abs(x - tm.x(g.start)) < 14 or abs(x - tm.x(g.end)) < 14 for g in lay.gaps) or t == a:
+                    cv.line(x, axis_y, x, axis_y + 4, c["muted"], width=1)
+                    label = format_time(t, d.timescale, digits=tick_digits)[: -len(d.timescale)]
+                    cv.text(x, axis_y + 16, label, c["muted"], size=10, anchor="middle", mono=True)
+                k += 1
     cv.text(x_end + 8, axis_y + 4, d.timescale, c["muted"], size=10, mono=True)
 
     # ---- markers ----
@@ -261,7 +277,7 @@ def render_with_stats(d: Diagram) -> tuple[str, RenderStats]:
     for m, cx, lane_idx in lay.marker_items:
         x = tm.x(m.time)
         marker_xs.append(x)
-        ty = rows_top - 8 - lane_idx * 20
+        ty = lay.markers_bottom - 8 - lane_idx * 20
         line_top = min(rows_top - 3, ty + 4) if m.label else rows_top - 3
         cv.line(x, line_top, x, axis_y, c["marker"], width=1.1, dash="4 3", opacity=0.75)
         if m.label:
@@ -279,8 +295,9 @@ def render_with_stats(d: Diagram) -> tuple[str, RenderStats]:
             )
 
     # ---- measures (non-overlapping ones share lanes) ----
+    measure_labels: list[Box2D] = []
     mh_url = cv.url("mh")
-    for m, lane_idx, x1, x2, cx, label, inline in lay.measure_items:
+    for _m, lane_idx, x1, x2, cx, label, inline in lay.measure_items:
         ly = lay.lanes_top + lane_idx * LANE_H + 16
         for x in (x1, x2):
             if any(abs(x - mx) <= 1.0 for mx in marker_xs):
@@ -293,6 +310,7 @@ def render_with_stats(d: Diagram) -> tuple[str, RenderStats]:
             f'stroke-width="1.25" marker-start="{mh_url}" marker-end="{mh_url}"/>'
         )
         ty = ly + 3.8 if inline else ly - 6.5
+        measure_labels.append((cx, ty - 1.8, text_width(label, 10.5) / 2 + 5.5, BADGE_HALF_H))
         cv.text(
             cx,
             ty,
@@ -307,15 +325,33 @@ def render_with_stats(d: Diagram) -> tuple[str, RenderStats]:
         )
 
     # ---- arrows ----
+    min_annot_cy = (PAD + TITLE_H if d.title else PAD) + 5.5
+    max_annot_cy = max(min_annot_cy, (lay.lanes_top - 6.0) if lay.measure_items else (axis_y - 10.0))
     arrow_labels: list[Box2D] = []
     for a in lay.arrows:
-        _draw_arrow(cv, a, by_row, tm, x0, x_end, region_labels, bus_labels, arrow_labels, d.timescale, stats)
+        _draw_arrow(
+            cv,
+            a,
+            by_row,
+            tm,
+            x0,
+            x_end,
+            rows_top - 4.0,
+            max_annot_cy,
+            region_labels,
+            bus_labels,
+            marker_labels,
+            measure_labels,
+            arrow_labels,
+            d.timescale,
+            stats,
+        )
 
     # ---- single-point callout notes ----
     if lay.notes:
         note_labels: list[Box2D] = []
-        min_note_cy = (PAD + TITLE_H if d.title else PAD) + 5.5
-        max_note_cy = max(min_note_cy, axis_y - 10.0)
+        min_note_cy = min_annot_cy
+        max_note_cy = max_annot_cy
         for n in lay.notes:
             _draw_note(
                 cv,
@@ -330,6 +366,7 @@ def render_with_stats(d: Diagram) -> tuple[str, RenderStats]:
                 bus_labels,
                 arrow_labels,
                 marker_labels,
+                measure_labels,
                 note_labels,
                 d.timescale,
                 stats,
@@ -381,11 +418,13 @@ def _draw_clock(cv: Canvas, b: RowBox, clk: Clock, tm: TimeMap, d_end: Fraction)
     chevrons = []
     show_chevrons = float(min(clk.duty, 1 - clk.duty) * clk.period) * tm.scale >= 12
     for a, end in tm.visible():
-        level = clk.level_at(a)
+        edge_at_a = clk._edge_kind_at(a) if a < d_end else None
+        level = clk._level_before(a) if edge_at_a is not None else clk.level_at(a)
         x_start = tm.x(a) - (GAP_W / 2 if a > 0 else 0.0)
         x_stop = tm.x(end) + (GAP_W / 2 if end < d_end else 0.0)
         p = [f"M{fmt(x_start)},{fmt(b.hi if level else b.lo)}"]
-        for t, kind in clk.edges_between(a, end):
+        edges = ([(a, edge_at_a)] if edge_at_a is not None else []) + clk.edges_between(a, end)
+        for t, kind in edges:
             level = 1 if kind == "rise" else 0
             tx = tm.x(t)
             p.append(f"H{fmt(tx)}V{fmt(b.hi if level else b.lo)}")
@@ -497,12 +536,24 @@ def _draw_bus(
         )
         # Put the value in the widest piece of the segment that no gap covers.
         pieces = [(max(t0, a), min(t1, e)) for a, e in tm.visible() if min(t1, e) > max(t0, a)]
+        raw_label = sig.display(v)
         if not pieces:
+            if stats is not None:
+                stats.dropped_labels.append(
+                    {
+                        "signal": sig.name,
+                        "start": format_time(t0, timescale),
+                        "end": format_time(t1, timescale),
+                        "value": raw_label,
+                        "reason": "inside_gap",
+                    }
+                )
             continue
         best = max(pieces, key=lambda p: tm.x(p[1]) - tm.x(p[0]))
-        bx1, bx2 = tm.x(best[0]) + sl, tm.x(best[1]) - sr
+        eff_sl = sl if best[0] == t0 else 0.0
+        eff_sr = sr if best[1] == t1 else 0.0
+        bx1, bx2 = tm.x(best[0]) + eff_sl, tm.x(best[1]) - eff_sr
         room = bx2 - bx1 - 6
-        raw_label = sig.display(v)
         label = raw_label
         if room < VALUE_SIZE:
             if stats is not None:
@@ -551,7 +602,7 @@ def _draw_bus(
             mono=True,
             weight="500",
         )
-        bus_labels.append((cx, b.mid + 2.1, text_width(label, VALUE_SIZE, mono=True) / 2, 7.5))
+        bus_labels.append((cx, b.mid + 2.1, text_width(label, VALUE_SIZE, mono=True) / 2, BUS_LABEL_HALF_H))
 
 
 def _arrow_anchor_y(b: RowBox, row: Row, time: Fraction) -> float:
@@ -567,8 +618,12 @@ def _draw_arrow(
     tm: TimeMap,
     x0: float,
     x_end: float,
+    min_cy: float,
+    max_cy: float,
     region_labels: list[Box2D],
     bus_labels: list[Box2D],
+    marker_labels: list[Box2D],
+    measure_labels: list[Box2D],
     arrow_labels: list[Box2D],
     timescale: str = "ns",
     stats: RenderStats | None = None,
@@ -590,9 +645,16 @@ def _draw_arrow(
     mx, my = _bezier_pt(x1, y1, c1, c2, x2, y2, 0.5)
     if a.label:
         half_w = text_width(a.label, 10.5) / 2 + 5.5
-        half_h = 7.1
-        obstacles = region_labels + bus_labels + arrow_labels
-        mx = _clamp_cx(mx, half_w, x0, x_end)
+        half_h = BADGE_HALF_H
+        obstacles = region_labels + bus_labels + marker_labels + measure_labels + arrow_labels
+
+        def _arrow_score(item: tuple[int, float, float, float]) -> tuple[int, float, int]:
+            idx, px, py, disp = item
+            return (
+                _collides(px, py + 2.0, half_w, half_h, obstacles),
+                round(_near_penalty(px, py + 2.0, half_w, half_h, obstacles) + disp, 2),
+                idx,
+            )
 
         if same_row:
             candidates = []
@@ -601,25 +663,29 @@ def _draw_arrow(
                 for t in (0.5, 0.35, 0.65):
                     px, py = _bezier_pt(x1, y1, tc1, tc2, x2, y2, t)
                     px = _clamp_cx(px, half_w, x0, x_end)
-                    candidates.append((px, py, tc1, tc2))
-            best = min(
-                candidates,
-                key=lambda cand: _collides(cand[0], cand[1] + 2.0, half_w, half_h, obstacles),
+                    disp = (test_lift - 22.0) * 0.25 + (0.0 if t == 0.5 else 2.5)
+                    candidates.append((px, py, disp, tc1, tc2))
+            best_idx = min(
+                range(len(candidates)),
+                key=lambda i: _arrow_score((i, candidates[i][0], candidates[i][1], candidates[i][2])),
             )
-            mx, my, c1, c2 = best
+            mx, my, _, c1, c2 = candidates[best_idx]
         else:
-            candidates_diff: list[tuple[float, float]] = []
+            candidates_diff: list[tuple[float, float, float]] = []
             for t in (0.5, 0.35, 0.65, 0.25, 0.75):
                 px, py = _bezier_pt(x1, y1, c1, c2, x2, y2, t)
-                candidates_diff.append((_clamp_cx(px, half_w, x0, x_end), py))
+                candidates_diff.append((_clamp_cx(px, half_w, x0, x_end), py, abs(t - 0.5) * 10.0))
             base_x, base_y = _bezier_pt(x1, y1, c1, c2, x2, y2, 0.5)
             base_x = _clamp_cx(base_x, half_w, x0, x_end)
+            lo_cy = min(min_cy, max_cy)
             for dy in (-14.0, 14.0, -24.0, 24.0):
-                candidates_diff.append((base_x, base_y + dy))
-            mx, my = min(
-                candidates_diff,
-                key=lambda cand: _collides(cand[0], cand[1] + 2.0, half_w, half_h, obstacles),
+                clamped_y = min(max(base_y + dy, lo_cy), max_cy)
+                candidates_diff.append((base_x, clamped_y, 6.0 if abs(dy) <= 14.0 else 10.0))
+            best_idx = min(
+                range(len(candidates_diff)),
+                key=lambda i: _arrow_score((i, *candidates_diff[i])),
             )
+            mx, my, _ = candidates_diff[best_idx]
 
         best_hits = _collides(mx, my + 2.0, half_w, half_h, obstacles)
         if best_hits > 0 and stats is not None:
@@ -673,6 +739,9 @@ def _note_anchor_y(b: RowBox, n: Note) -> float:
     return b.mid
 
 
+_NOTE_DISP = (0.0, 2.5, 2.5, 5.0, 5.0, 5.0, 1.5, 4.0, 4.0, 6.5, 6.5, 6.5)
+
+
 def _draw_note(
     cv: Canvas,
     n: Note,
@@ -686,6 +755,7 @@ def _draw_note(
     bus_labels: list[Box2D],
     arrow_labels: list[Box2D],
     marker_labels: list[Box2D],
+    measure_labels: list[Box2D],
     note_labels: list[Box2D],
     timescale: str = "ns",
     stats: RenderStats | None = None,
@@ -697,8 +767,8 @@ def _draw_note(
     ay = _note_anchor_y(b, n)
 
     half_w = text_width(n.label, 10.5) / 2 + 5.5
-    half_h = 7.1
-    obstacles = region_labels + bus_labels + arrow_labels + marker_labels + note_labels
+    half_h = BADGE_HALF_H
+    obstacles = region_labels + bus_labels + arrow_labels + marker_labels + measure_labels + note_labels
 
     above = [(0.0, -21.0), (22.0, -21.0), (-22.0, -21.0), (32.0, -30.0), (-32.0, -30.0), (0.0, -32.0)]
     below = [(0.0, 19.0), (22.0, 19.0), (-22.0, 19.0), (32.0, 28.0), (-32.0, 28.0), (0.0, 30.0)]
@@ -710,11 +780,12 @@ def _draw_note(
         cy = min(max(b.mid + dy, min_cy), max_cy)
         candidates.append((cx, cy, idx))
 
-    def _score(cand: tuple[float, float, int]) -> tuple[int, int, int]:
+    def _score(cand: tuple[float, float, int]) -> tuple[int, int, float, int]:
         cx, cy, idx = cand
         hits = _collides(cx, cy + 2.0, half_w, half_h, obstacles)
         on_row = 1 if (b.hi - 5.0 < cy + 2.0 < b.lo + 5.0) else 0
-        return (hits, on_row, idx)
+        near = _near_penalty(cx, cy + 2.0, half_w, half_h, obstacles)
+        return (hits, on_row, round(near + _NOTE_DISP[idx], 2), idx)
 
     cx, cy, _ = min(candidates, key=_score)
     best_hits = _collides(cx, cy + 2.0, half_w, half_h, obstacles)

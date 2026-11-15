@@ -3,25 +3,39 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import contextlib
 import io
 import json
 import re
 import sys
+import textwrap
 import traceback
 import warnings
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Sequence
 
 from .diagram import Diagram
 from .errors import WaveError, WaveWarning
 from .inspect import inspect_diagram, to_dict
 
-_OPEN_FENCE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
+_OPEN_FENCE_RE = re.compile(r"^([ \t]*)(`{3,}|~{3,})(.*)$")
+
+
+def _ensure_utf8_stdio() -> None:
+    """Force UTF-8 on stdio streams so Windows/non-UTF8 locales don't mangle output."""
+    for stream in (sys.stdin, sys.stdout, sys.stderr):
+        reconf = getattr(stream, "reconfigure", None)
+        enc = getattr(stream, "encoding", "") or ""
+        if callable(reconf) and enc.lower().replace("-", "") != "utf8":
+            try:
+                reconf(encoding="utf-8", errors="strict" if stream is sys.stdin else "replace")
+            except OSError:
+                pass
 
 
 def _scan_top_level_fences(raw: str) -> list[tuple[str, str, str]]:
-    """Return ``(fence_char, info_head, body)`` for closed top-level Markdown fences."""
+    """Return ``(fence_char, info_head, dedented_body)`` for closed top-level Markdown fences."""
     lines = raw.splitlines(keepends=True)
     fences: list[tuple[str, str, str]] = []
     i = 0
@@ -31,14 +45,14 @@ def _scan_top_level_fences(raw: str) -> list[tuple[str, str, str]]:
         if not m:
             i += 1
             continue
-        fence = m.group(1)
+        fence = m.group(2)
         fence_char = fence[0]
         fence_len = len(fence)
-        info = m.group(2).strip()
+        info = m.group(3).strip()
         if fence_char == "`" and "`" in info:
             i += 1
             continue
-        close_re = re.compile(rf"^ {{0,3}}{re.escape(fence_char)}{{{fence_len},}}[ \t]*$")
+        close_re = re.compile(rf"^[ \t]*{re.escape(fence_char)}{{{fence_len},}}[ \t]*$")
         close_idx = -1
         for j in range(i + 1, len(lines)):
             if close_re.match(lines[j].rstrip("\r\n")):
@@ -48,27 +62,49 @@ def _scan_top_level_fences(raw: str) -> list[tuple[str, str, str]]:
             i += 1
             continue
         head = info.split()[0] if info else ""
-        body = "".join(lines[i + 1 : close_idx])
+        body = textwrap.dedent("".join(lines[i + 1 : close_idx]))
         fences.append((fence_char, head, body))
         i = close_idx + 1
     return fences
 
 
+def _numbered_blocks(blocks: list[str], filename: str) -> list[tuple[str, str]]:
+    if len(blocks) == 1:
+        return [(filename, blocks[0])]
+    return [(f"{filename}#block-{i + 1}", b) for i, b in enumerate(blocks)]
+
+
 def _extract_blocks(raw: str, filename: str) -> list[tuple[str, str]]:
+    suffix = "" if filename == "<stdin>" else Path(filename).suffix.lower()
+    if suffix == ".py":
+        return [(filename, raw)]
+
+    is_md = suffix in (".md", ".markdown")
+    if not is_md:
+        dedented = textwrap.dedent(raw)
+        try:
+            ast.parse(dedented)
+        except SyntaxError:
+            pass
+        else:
+            return [(filename, dedented)]
+
     fences = _scan_top_level_fences(raw)
-    wave_blocks = [
-        body for char, head, body in fences if char == "`" and head in ("python_wave", "waveview")
-    ]
+    wave_blocks = [body for _, head, body in fences if head in ("python_wave", "waveview")]
     if wave_blocks:
-        if len(wave_blocks) == 1:
-            return [(filename, wave_blocks[0])]
-        return [(f"{filename}#block-{i + 1}", b) for i, b in enumerate(wave_blocks)]
+        return _numbered_blocks(wave_blocks, filename)
+
+    py_blocks = [body for _, head, body in fences if head in ("python", "py")]
+    if py_blocks:
+        return _numbered_blocks(py_blocks, filename)
+
     if raw.lstrip().startswith(("```", "~~~")):
-        py_blocks = [body for _, head, body in fences if head in ("python", "py")]
-        if py_blocks:
-            if len(py_blocks) == 1:
-                return [(filename, py_blocks[0])]
-            return [(f"{filename}#block-{i + 1}", b) for i, b in enumerate(py_blocks)]
+        bare_blocks = [body for _, head, body in fences if not head]
+        if bare_blocks:
+            return _numbered_blocks(bare_blocks, filename)
+
+    if is_md:
+        raise WaveError(f"{filename} 没有找到可执行的 python_wave / python 代码块")
     return [(filename, raw)]
 
 
@@ -93,18 +129,17 @@ def _run_diagram_code(code: str, filename: str) -> tuple[Diagram, list[str]]:
         return d, exec_warnings
     found = [v for v in ns.values() if isinstance(v, Diagram)]
     if found:
-        return found[-1], exec_warnings
+        return max(found, key=lambda diag: diag._seq), exec_warnings
     raise WaveError(f"{filename} 没有定义 Diagram 实例（请先写 d = Diagram(...)）")
 
 
 def _cmd_check(args: argparse.Namespace) -> int:
     try:
         filename, raw = _read_source(args.source)
-    except OSError as exc:
+        blocks = _extract_blocks(raw, filename)
+    except (OSError, WaveError) as exc:
         print(f"读取失败：{exc}", file=sys.stderr)
         return 1
-
-    blocks = _extract_blocks(raw, filename)
     reports = []
     any_issue = False
     any_error = False
@@ -118,20 +153,24 @@ def _cmd_check(args: argparse.Namespace) -> int:
             if not info["ok"]:
                 any_issue = True
             reports.append((label, d, exec_warnings, info))
+        except SystemExit as exc:
+            any_error = True
+            detail = "0" if exc.code is None else str(exc.code)
+            print(f"[{label}] SystemExit: 脚本调用了 sys.exit({detail})", file=sys.stderr)
         except Exception as exc:
             any_error = True
             if isinstance(exc, (WaveError, SyntaxError)):
                 print(f"[{label}] {type(exc).__name__}: {exc}", file=sys.stderr)
             else:
                 traceback.print_exc(file=sys.stderr)
-            return 1
 
-    if args.format == "json":
-        payload = reports[0][3] if len(reports) == 1 else [r[3] for r in reports]
-        print(json.dumps(payload, ensure_ascii=False, indent=2))
-    else:
-        chunks = [inspect_diagram(d, fmt="text", extra_warnings=w) for _, d, w, _ in reports]
-        print("\n\n".join(chunks))
+    if reports:
+        if args.format == "json":
+            payload = reports[0][3] if len(reports) == 1 else [r[3] for r in reports]
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
+        else:
+            chunks = [inspect_diagram(d, fmt="text", extra_warnings=w) for _, d, w, _ in reports]
+            print("\n\n".join(chunks))
 
     if any_error:
         return 1
@@ -166,6 +205,10 @@ def _cmd_render(args: argparse.Namespace) -> int:
         else:
             print(f"已保存：{args.output}")
         return 0
+    except SystemExit as exc:
+        detail = "0" if exc.code is None else str(exc.code)
+        print(f"SystemExit: 脚本调用了 sys.exit({detail})", file=sys.stderr)
+        return 1
     except Exception as exc:
         if isinstance(exc, (WaveError, SyntaxError, OSError)):
             print(f"{type(exc).__name__}: {exc}", file=sys.stderr)
@@ -175,6 +218,7 @@ def _cmd_render(args: argparse.Namespace) -> int:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    _ensure_utf8_stdio()
     parser = argparse.ArgumentParser(
         prog="waveview",
         description="检查、采样分析与渲染 waveview 时序图脚本",

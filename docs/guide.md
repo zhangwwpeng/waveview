@@ -92,7 +92,7 @@ Diagram(
 | `theme` | `"light"` | 配色主题，内置 `"light"`、`"dark"`、`"bamboo"`（详见[第 7 节](#7-主题配色与自定义扩展)）。 |
 | `px_per_ns` | `None` | 手动指定每秒的水平缩放比例（每纳秒像素数，必须为有限正数，与 `width` 互斥）。为 `None` 时自动计算：确保最窄时钟半周期清晰，并按总线（`bus`）各**可见分段**的最窄文字需求自动加宽（未传 `width` 时受 `max_width` 限制）。 |
 | `warn_noop` | `True` | 是否在“信号被赋予了与当前值相同的值”时发出 `WaveWarning`。设为 `False` 时不仅静音告警，`describe()` / `inspect()` 也会自动省略没有实际跳变的 `1→1` 噪声，同时仍保留返回事件 `e.sig` 的点句柄。 |
-| `max_width` | `2400.0` | 默认自动缩放（未传 `width` 时）允许的最大时间轴像素宽度（单位 px；传 `None` 可完全放开自动展宽，避免 32/64 位长总线图截断）。 |
+| `max_width` | `2400.0` | 默认自动缩放（未传 `width` 时）允许的最大**总画布宽度**（单位 px，含左侧信号名与右边距；传 `None` 可完全放开自动展宽，避免 32/64 位长总线图截断）。 |
 | `width` | `None` | 期望的总画布目标像素宽度（如 `width=900`，与 `px_per_ns` 互斥）。会在扣除左侧标签栏、断轴及右边距后反推缩放比，并仍保留时钟最小周期可读性与总线文字不截断两项硬约束；若硬约束或长图注/标题超出目标宽度，会在 `inspect()` / `canvas.width_drivers` 中指出具体驱动源。 |
 
 ---
@@ -101,9 +101,9 @@ Diagram(
 
 ### 标识符与显示名：`name` vs `label`
 
-所有时钟和信号的第一个参数 `name` 必须是合法的 **Python 标识符**（字母/数字/下划线且不以数字开头、非 Python 关键字），因为在赋值和读取事件句柄时你要直接把它当作关键字参数或属性来写（如 `e1.data` 或 `(data=0xA5)`）。
+所有时钟和信号的第一个参数 `name` 必须是合法的 **Python 标识符**（字母/数字/下划线且不以数字开头、**不能以下划线 `_` 开头**、非 Python 关键字），因为在赋值和读取事件句柄时你要直接把它当作关键字参数或属性来写（如 `e1.data` 或 `(data=0xA5)`）。
 
-如果需要展示总线位宽、反相斜杠或中文名，请传入 `label=`：
+如果需要展示总线位宽、下划线前缀、反相斜杠或中文名，请传入 `label=`：
 
 ```python
 data = d.bus("data", width=8, label="data[7:0]")
@@ -158,7 +158,7 @@ for _ in range(8):
 sclk.disable()         # 从当前游标时刻起关闭时钟，回到 idle 电平
 ```
 
-`idle` 默认为 `0`，也可设为 `1`（例如 I2C 的 `SCL` 空闲拉高）。`enable(at=...)` / `disable(at=...)` 也接受具体时间字符串、`Event` 或 `Point` 等任意 `TimeRef`，支持多段开关窗口。在窗口边界如果发生实际电平切换（如 `idle=1` 时钟从 `1` 切入高/低相位的 `0`），也会精确生成对应边沿。
+`idle` 默认为 `0`，也可设为 `1`（例如 I2C 的 `SCL` 空闲拉高）。`enable(at=...)` / `disable(at=...)` 也接受具体时间字符串、`Event` 或 `Point` 等任意 `TimeRef`，支持多段开关窗口。在窗口边界如果发生实际电平切换（如 `idle=1` 时钟从 `1` 切入高/低相位的 `0`），也会精确生成对应边沿。（注意：若在声明时未传 `gated=True` 的自由时钟上直接调用 `enable(at)` 且 `at > 0`，库会发出 `WaveWarning` 提醒 `at` 之前的时钟沿将被屏蔽。）
 
 ### 4.2 单比特线 `d.wire()`
 
@@ -179,7 +179,7 @@ addr = d.bus("addr", init="x", width=16, fmt="hex", label="addr[15:0]", pad=True
 ```
 
 - `fmt` 支持 `"hex"`（默认，如 `0x0024`）、`"dec"`（十进制）、`"bin"`（如 `0b10100101`）；默认 `pad=True` 按 `width` 补前导零，设为 `pad=False` 时保留 `width` 位宽范围检查但省略前导零（如 32 位总线显示为 `0x270F` 而非 `0x0000270F`）。
-- 若传入整数且声明了 `width`，超出 `[0, 2^width - 1]` 或传入负数都会在运行时立刻抛出友好的 `WaveError` 检查位宽溢出。
+- 若传入整数或 `0x...` / `0b...` / `0o...` 进制字面量字符串（如 `"0xA5"`，与整数 `0xA5` 等价判等）且声明了 `width`，超出 `[0, 2^width - 1]` 或传入负数都会在运行时立刻抛出友好的 `WaveError` 检查位宽溢出。
 - 也可以直接传任意文本状态（例如 `"IDLE"`、`"HEADER"`、`"CRC"`），以及 `"x"` / `"z"`。
 
 ### 4.4 嵌套分组 `with d.group()`
@@ -205,7 +205,7 @@ with d.group("主机接口"):
 | `d.posedge(clk, n=1, *, tco=None)` | `repeat(n) @(posedge clk)` | 严格向前寻找第 `n` 个上升沿（游标尚未移动时可落在 `t = 0`），并额外前进 `tco`（默认取 `clk.tco`）。`clk` 可传对象或时钟名字符串。 |
 | `d.negedge(clk, n=1, *, tco=None)` | `repeat(n) @(negedge clk)` | 严格向前寻找第 `n` 个下降沿，并额外前进 `tco`。 |
 | `d.delay(t)` | `#t` | 在当前游标基础上向后推移 `t`（`t >= 0`）。 |
-| `d.at(t)` | 跳转到绝对时刻 `t` | 常用于异步复位或异步事件。若 `t < 当前游标` 会发出 `WaveWarning` 提示时间往回走，但允许插入且 `describe()` 仍会按真实时间顺序准确呈现 `old→new`。 |
+| `d.at(t)` | 跳转到绝对时刻 `t` | 常用于异步复位或锚点跳转（支持时间字符串或 `Event`/`Point`/`d.now` 等任意 `TimeRef`）。若 `t < 当前游标` 会发出 `WaveWarning` 提示时间往回走，但允许插入且 `describe()` 仍会按真实时间顺序准确呈现 `old→new`。 |
 | `d.gap(t)` | 推进 `t` 并折叠绘制 | 游标前进 `t`（`t > 0`），画布上把这段漫长空闲挤压为带有双波浪断口的窄带，适合展示数微秒等待前后的两个突发。 |
 
 ### 赋值与读取当前时刻
@@ -307,7 +307,7 @@ png_bytes = d.to_png(scale=2)          # 获取 PNG 二进制字节流
 ### 8.2 Notebook 与扩展内联渲染
 
 - **Jupyter / IPython / Marimo**：`Diagram` 实现了 `_repr_svg_()`，在单元格最后一行直接写 `d` 即可直接内联出图。
-- **`omp` TUI 渲染插件**（[extensions/waveview.ts](../extensions/waveview.ts)）：通过 `omp install github:zhangwwpeng/waveview`（或本地仓库根目录执行 `omp plugin link .`）并在 `~/.omp/agent/config.yml` 开启 `extensionRenderers.assistantText: true` 后，回复中的 ```` ```python_wave ```` 代码块会在后台运行并自动替换成内联 SVG（支持任意变量名的 `Diagram` 实例，且跨任意工作目录可用；可用 `WAVEVIEW_BIN` 覆盖 CLI 路径）。
+- **`omp` TUI 渲染插件**（[extensions/waveview.ts](../extensions/waveview.ts)）：通过 `omp install github:zhangwwpeng/waveview`（或本地仓库根目录执行 `omp plugin link .`）并在 `~/.omp/agent/config.yml` 开启 `extensionRenderers.assistantText: true` 后，回复中的 ```` ```python_wave ```` / ```` ~~~python_wave ```` 代码块会在后台运行并自动替换成内联 SVG（支持任意变量名的 `Diagram` 实例，子进程在系统临时目录 `tmpdir()`、精简白名单环境变量与默认 `8000ms` 超时下执行；可随时设 `WAVEVIEW_DISABLE=1` 临时禁用、`WAVEVIEW_BIN` 覆盖 CLI 路径、`WAVEVIEW_TIMEOUT_MS` 调整超时，同时仍请勿直接渲染来源不可信的恶意脚本）。
 
 ### 8.3 文本校对、AI 自检与时序采样
 
@@ -315,8 +315,8 @@ png_bytes = d.to_png(scale=2)          # 获取 PNG 二进制字节流
 - **`d.check()`**：在 `to_svg()` / `to_png()` / `save()` 时自动运行，对两类常见失误发出 `WaveWarning`：
   1. 有事件或标注超出了手动设置的 `end`；
   2. 某信号从未被赋值过且初值为 `"x"`（整行全是未知阴影）。
-- **`d.sample(clk, edge="rise", *, include_gaps=False)`**：按时钟有效边沿逐拍采样全部信号，返回 `[{"edge": 1, "time": "5ns", "time_s": 5e-9, "signals": {name: {"sampled": ..., "after": ..., "changed": bool}}}, ...]`，其中 `sampled` 为边沿到达前一瞬间的值（触发器采样值），`after` 为边沿后的更新值。
-- **`d.handshakes(clk, valid, ready, *, edge="rise", active=1)` / `d.expect_handshake(...)` / `d.expect_stable(...)`**：声明式协议核对原语——自动按 `sampled` 语义找出或断言所有 `valid && ready` 握手拍（写偏一拍会指出当前拍实际采样值、刚变化需下拍采样的提示及真实握手边沿），以及检查等待窗口内载荷保持稳定且无 `x`/`z`。
+- **`d.sample(clk, edge="rise", *, include_gaps=False)`**：按时钟有效边沿逐拍采样全部信号，返回 `[{"edge": 1, "time": "0ns", "time_s": 0.0, "signals": {name: {"sampled": ..., "after": ..., "changed": bool}}}, ...]`，其中 `sampled` 为边沿到达前一瞬间的值（触发器采样值），`after` 为边沿后的更新值。
+- **`d.handshakes(clk, valid, ready, *, edge="rise", active=1, include_gaps=False)` / `d.expect_handshake(..., include_gaps=False)` / `d.expect_stable(...)`**：声明式协议核对原语——自动按 `sampled` 语义找出或断言所有 `valid && ready` 握手拍（默认与 `sample()` 一致跳过 `gap` 内部不可见边沿；写偏一拍会指出当前拍实际采样值、刚变化需下拍采样的提示及真实握手边沿），以及检查等待窗口内载荷保持稳定且无 `x`/`z`。
 - **`d.to_dict()` / `d.inspect(fmt="text" | "json")`**：一次输出 `ok`、`svg_valid`、画布尺寸与布局诊断（`truncated_labels` / `dropped_labels` / `crowded_arrows` / `crowded_notes` / `crowded_regions`）、`warnings`、`layout_issues`、`steps` 及各时钟 `clock_samples`，让 AI 无需生成或读取 PNG 图片即可完成版式与时序双重验证。
 
 ### 8.4 CLI 命令与 Skill 封装
