@@ -107,6 +107,7 @@ class Wait:
 
 
 TimeRef = Event | Point | Instant | Wait | str | int | float | Fraction
+PointRef = Point | tuple[Row | str, TimeRef]
 
 
 def _positive_finite(value: object, name: str) -> float:
@@ -127,6 +128,7 @@ class Diagram:
         theme: str = "light",
         px_per_ns: float | None = None,
         warn_noop: bool = True,
+        max_width: float | None = 2400.0,
     ):
         if timescale not in TIME_UNITS:
             raise WaveError(f'timescale "{timescale}" 不认识，可用：{", ".join(TIME_UNITS)}')
@@ -135,11 +137,14 @@ class Diagram:
             raise WaveError(f"theme 只能是 {names} 之一，收到的是 {theme!r}")
         if px_per_ns is not None:
             px_per_ns = _positive_finite(px_per_ns, "px_per_ns")
+        if max_width is not None:
+            max_width = _positive_finite(max_width, "max_width")
         self.title = title
         self.timescale = timescale
         self.theme = theme
         self.px_per_ns = px_per_ns
         self.warn_noop = warn_noop
+        self.max_width: float | None = max_width
         self._end = None if end is None else self._time(end)
         if self._end is not None and self._end <= 0:
             raise WaveError(f"end 必须大于 0，收到的是 {end!r}")
@@ -178,6 +183,7 @@ class Diagram:
         start: TimeRef | None = None,
         stop: TimeRef | None = None,
         gated: bool = False,
+        tco: str | int | float | Fraction = 0,
     ) -> Clock:
         self._declare(name)
         if (freq is None) == (period is None):
@@ -194,6 +200,13 @@ class Diagram:
             raise WaveError(f'时钟 "{name}"：duty 必须在 0 和 1 之间（不含），收到的是 {duty}')
         if isinstance(idle, bool) or idle not in (0, 1):
             raise WaveError(f'时钟 "{name}"：idle 只能是 0 或 1，收到的是 {idle!r}')
+        if isinstance(tco, bool) or not isinstance(tco, (str, int, float, Fraction)):
+            raise WaveError(f'时钟 "{name}"：tco 必须是有效的时间，收到的是 {tco!r}')
+        tco_val = self._time(tco)
+        if tco_val < 0 or tco_val >= p:
+            raise WaveError(
+                f'时钟 "{name}"：tco 必须大于等于 0 且小于时钟周期 {format_time(p, self.timescale)}'
+            )
         ph = parse_phase(phase, p, self.timescale) % p
 
         s_t = None if start is None else self._resolve(start)
@@ -217,6 +230,7 @@ class Diagram:
             tuple(self._groups),
             idle=idle,
             windows=windows,
+            tco=tco_val,
             _gated=is_gated,
             _diagram=self,
         )
@@ -226,7 +240,7 @@ class Diagram:
 
     def wire(self, name: str, init: Value = "x", label: str | None = None) -> Signal:
         self._declare(name)
-        sig = Signal(name, label or name, "wire", "x", groups=tuple(self._groups))
+        sig = Signal(name, label or name, "wire", "x", groups=tuple(self._groups), _diagram=self)
         sig.init = self._normalise(sig, init)
         self.rows.append(sig)
         self._names[name] = sig
@@ -239,13 +253,26 @@ class Diagram:
         width: int | None = None,
         fmt: Literal["hex", "dec", "bin"] = "hex",
         label: str | None = None,
+        pad: bool = True,
     ) -> Signal:
         self._declare(name)
         if width is not None and (not isinstance(width, int) or width < 1):
             raise WaveError(f'总线 "{name}"：width 必须是正整数，收到的是 {width!r}')
         if fmt not in ("hex", "dec", "bin"):
             raise WaveError(f'总线 "{name}"：fmt 只能是 "hex"、"dec" 或 "bin"')
-        sig = Signal(name, label or name, "bus", "x", width, fmt, tuple(self._groups))
+        if not isinstance(pad, bool):
+            raise WaveError(f'总线 "{name}"：pad 必须是布尔值，收到的是 {pad!r}')
+        sig = Signal(
+            name,
+            label or name,
+            "bus",
+            "x",
+            width,
+            fmt,
+            tuple(self._groups),
+            pad=pad,
+            _diagram=self,
+        )
         sig.init = self._normalise(sig, init)
         self.rows.append(sig)
         self._names[name] = sig
@@ -279,24 +306,52 @@ class Diagram:
             raise WaveError(f'时钟 "{clk.name}" 不属于当前图表')
         return clk
 
-    def _edge(self, clk: Clock | str, n: int, kind: Literal["rise", "fall"]) -> Wait:
+    def _edge(
+        self,
+        clk: Clock | str,
+        n: int,
+        kind: Literal["rise", "fall"],
+        tco: str | int | float | Fraction | None = None,
+    ) -> Wait:
         clk = self._clock(clk)
-        if not isinstance(n, int) or n < 1:
+        if isinstance(n, bool) or not isinstance(n, int) or n < 1:
             raise WaveError(f"等待的边沿数必须是正整数，收到的是 {n!r}")
+        if tco is None:
+            dt = clk.tco
+        else:
+            if isinstance(tco, bool) or not isinstance(tco, (str, int, float, Fraction)):
+                raise WaveError(f"tco 必须是有效的时间，收到的是 {tco!r}")
+            dt = self._time(tco)
+            if dt < 0:
+                raise WaveError(f"tco 不能是负数，收到的是 {tco!r}")
         now, index = self._now, 0
         for _ in range(n):
             now, index = clk.next_edge(kind, now)
-        self._now = now
+        self._now = now + dt
         self._cause = f"{clk.name}{'↑' if kind == 'rise' else '↓'}#{index}"
-        return Wait(self, now, self._cause)
+        if dt > 0:
+            self._cause += f"+{format_time(dt, self.timescale)}"
+        return Wait(self, self._now, self._cause)
 
-    def posedge(self, clk: Clock | str, n: int = 1) -> Wait:
+    def posedge(
+        self,
+        clk: Clock | str,
+        n: int = 1,
+        *,
+        tco: str | int | float | Fraction | None = None,
+    ) -> Wait:
         """@(posedge clk); ``n`` > 1 is repeat(n) @(posedge clk)."""
-        return self._edge(clk, n, "rise")
+        return self._edge(clk, n, "rise", tco=tco)
 
-    def negedge(self, clk: Clock | str, n: int = 1) -> Wait:
+    def negedge(
+        self,
+        clk: Clock | str,
+        n: int = 1,
+        *,
+        tco: str | int | float | Fraction | None = None,
+    ) -> Wait:
         """@(negedge clk); ``n`` > 1 is repeat(n) @(negedge clk)."""
-        return self._edge(clk, n, "fall")
+        return self._edge(clk, n, "fall", tco=tco)
 
     def delay(self, t: str | int | float) -> Wait:
         """#t: move the cursor forward by ``t``."""
@@ -429,18 +484,40 @@ class Diagram:
             raise WaveError(f'信号或时钟 "{row.name}" 不属于当前图表')
         return row
 
-    def arrow(self, src: Point, dst: Point, label: str | None = None) -> None:
-        """An arrow from one transition to another: ``d.arrow(e1.req, e2.ack)``."""
-        for end, ref in (("起点", src), ("终点", dst)):
-            if not isinstance(ref, Point):
-                raise WaveError(
-                    f"箭头的{end}要写成某个事件里的信号跳变，比如 e1.req，收到的是 {ref!r}"
-                )
+    def point(self, row: Row | str, at: TimeRef | None = None) -> Point:
+        """Return a non-mutating Point anchor on ``row`` at ``at`` (defaults to ``d.now``)."""
+        r = self._row(row)
+        t = (self._now or Fraction(0)) if at is None else self._resolve(at)
+        if t < 0:
+            raise WaveError("point 的时间不能是负数")
+        return Point(r, t)
+
+    def _point_ref(self, ref: PointRef, end_name: str) -> Point:
+        if isinstance(ref, Point):
             if not any(r is ref.signal for r in self.rows):
-                raise WaveError(f'箭头的{end}信号 "{ref.signal.name}" 不属于当前图表')
-        if src == dst:
+                raise WaveError(f'箭头的{end_name}目标 "{ref.signal.name}" 不属于当前图表')
+            if ref.time < 0:
+                raise WaveError(f"箭头的{end_name}时间不能是负数")
+            return ref
+        if isinstance(ref, tuple) and len(ref) == 2:
+            row_ref, time_ref = ref
+            r = self._row(row_ref)
+            t = self._resolve(time_ref)
+            if t < 0:
+                raise WaveError(f"箭头的{end_name}时间不能是负数")
+            return Point(r, t)
+        raise WaveError(
+            f"箭头的{end_name}要写成信号跳变、边沿锚点或 (信号, 时间) 二元组"
+            f"（如 e1.req、clk.posedge(2) 或 (ready, e3)），收到的是 {ref!r}"
+        )
+
+    def arrow(self, src: PointRef, dst: PointRef, label: str | None = None) -> None:
+        """An arrow from one point/edge to another: ``d.arrow(e1.req, (ack, e2))`` or ``d.arrow(clk.posedge(2), e.q)``."""
+        p_src = self._point_ref(src, "起点")
+        p_dst = self._point_ref(dst, "终点")
+        if p_src == p_dst:
             raise WaveError("箭头的起点和终点不能是同一个信号跳变")
-        self.annotations.append(Arrow(src, dst, label))
+        self.annotations.append(Arrow(p_src, p_dst, label))
 
     def region(self, row: Row | str, start: TimeRef, end: TimeRef, label: str | None = None) -> None:
         """Highlight ``row`` between ``start`` and ``end``."""

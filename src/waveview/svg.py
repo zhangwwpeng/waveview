@@ -1,200 +1,49 @@
-"""Lay the model out and draw it as an SVG string."""
+"""Render a computed DiagramLayout to an SVG string."""
 
 from __future__ import annotations
 
 import math
-import unicodedata
-from dataclasses import dataclass, field
 from fractions import Fraction
 from html import escape
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
-from .model import Arrow, Clock, Gap, Marker, Measure, Note, Region, Row, Signal
+from .layout import (
+    AXIS_H,
+    CAPTION_LINE_H,
+    CAPTION_SIZE,
+    GAP_W,
+    INDENT,
+    LABEL_SIZE,
+    LANE_H,
+    MONO,
+    PAD,
+    ROW_H,
+    SANS,
+    TITLE_H,
+    VALUE_SIZE,
+    Box2D,
+    DiagramLayout,
+    RenderStats,
+    RowBox,
+    TimeMap,
+    _bezier_path,
+    _bezier_pt,
+    _clamp_cx,
+    _collides,
+    _is_dark,
+    _merge_gaps,
+    _nice_step,
+    _ribbon_path,
+    compute_layout,
+    fmt,
+    text_width,
+)
+from .model import Arrow, Clock, Note, Row, Signal
 from .themes import THEMES
 from .units import TIME_UNITS, format_time
 
 if TYPE_CHECKING:
     from .diagram import Diagram
-
-
-SANS = (
-    "-apple-system, BlinkMacSystemFont, 'SF Pro Text', 'PingFang SC', 'Hiragino Sans GB', "
-    "'Noto Sans CJK SC', 'Microsoft YaHei', Helvetica, Arial, sans-serif"
-)
-MONO = (
-    "'SF Mono', 'JetBrains Mono', Menlo, Consolas, 'DejaVu Sans Mono', "
-    "'PingFang SC', 'Hiragino Sans GB', 'Noto Sans CJK SC', monospace"
-)
-
-PAD = 20
-TITLE_H = 34
-MARKER_BAND = 26
-ROW_H = 40
-WAVE_TOP = 13  # within a row
-WAVE_BOT = 31
-GROUP_H = 26
-INDENT = 14
-LANE_H = 26
-AXIS_H = 32
-GAP_W = 20
-LABEL_SIZE = 12.5
-VALUE_SIZE = 11
-CAPTION_SIZE = 11
-CAPTION_LINE_H = 18
-CAPTION_TOP_GAP = 10
-
-_WIDE_SYMBOLS = frozenset("←→↑↓↔⇒⇐…—–")
-
-
-def text_width(s: str, size: float, mono: bool = False) -> float:
-    w = 0.0
-    for ch in s:
-        if unicodedata.east_asian_width(ch) in ("W", "F"):
-            w += size * 1.04
-        elif ch in _WIDE_SYMBOLS:
-            w += size * 0.95
-        elif ch == " ":
-            w += size * 0.34
-        elif mono:
-            w += size * 0.61
-        else:
-            w += size * (0.63 if ch.isupper() or ch.isdigit() else 0.55)
-    return w
-
-
-def fmt(v: float) -> str:
-    return f"{v:.2f}".rstrip("0").rstrip(".")
-
-
-class TimeMap:
-    """Time -> x, with every gap squeezed into GAP_W pixels."""
-
-    def __init__(self, x0: float, scale: float, gaps: list[Gap], end: Fraction):
-        self.x0 = x0
-        self.scale = scale  # pixels per second
-        self.gaps = gaps
-        self.end = end
-
-    def x(self, t: Fraction) -> float:
-        acc, prev = self.x0, Fraction(0)
-        for g in self.gaps:
-            if t <= g.start:
-                break
-            acc += float(g.start - prev) * self.scale
-            if t < g.end:
-                return acc + float((t - g.start) / (g.end - g.start)) * GAP_W
-            acc += GAP_W
-            prev = g.end
-        return acc + float(t - prev) * self.scale
-
-    def visible(self) -> list[tuple[Fraction, Fraction]]:
-        out, prev = [], Fraction(0)
-        for g in self.gaps:
-            if g.start > prev:
-                out.append((prev, g.start))
-            prev = g.end
-        if self.end > prev:
-            out.append((prev, self.end))
-        return out
-
-
-def _merge_gaps(gaps: list[Gap], end: Fraction) -> list[Gap]:
-    out: list[Gap] = []
-    for g in sorted(gaps, key=lambda g: g.start):
-        if g.start >= end:
-            continue
-        g = Gap(g.start, min(g.end, end))
-        if out and g.start <= out[-1].end:
-            out[-1] = Gap(out[-1].start, max(out[-1].end, g.end))
-        else:
-            out.append(g)
-    return out
-
-
-def _max_visible_span(t0: Fraction, t1: Fraction, gaps: list[Gap]) -> Fraction:
-    cur = t0
-    best = Fraction(0)
-    for g in gaps:
-        if g.end <= cur:
-            continue
-        if g.start >= t1:
-            break
-        if g.start > cur:
-            best = max(best, g.start - cur)
-        cur = max(cur, g.end)
-    if t1 > cur:
-        best = max(best, t1 - cur)
-    return best
-
-
-@dataclass
-class RenderStats:
-    width: float = 0.0
-    height: float = 0.0
-    px_per_ns: float = 0.0
-    hit_width_cap: bool = False
-    truncated_labels: list[dict[str, Any]] = field(default_factory=list)
-    dropped_labels: list[dict[str, Any]] = field(default_factory=list)
-    crowded_arrows: list[dict[str, Any]] = field(default_factory=list)
-    crowded_notes: list[dict[str, Any]] = field(default_factory=list)
-
-
-def _scale_with_cap(d: Diagram, visible_span: Fraction, gaps: list[Gap], end: Fraction) -> tuple[float, bool]:
-    if d.px_per_ns:
-        return d.px_per_ns * 1e9, False
-    clocks = [r for r in d.rows if isinstance(r, Clock)]
-    span = float(visible_span) or 1e-9
-    if not clocks:
-        scale, floor = 900 / span, 0.0
-    else:
-        half = float(min(min(c.duty, 1 - c.duty) * c.period for c in clocks))
-        scale, floor = 16 / half, 5 / half
-    # Widen until every bus value fits in its own visible sub-segment.
-    for r in d.rows:
-        if isinstance(r, Signal) and r.kind == "bus":
-            for t0, t1, v in r.segments(end):
-                if v in ("x", "z"):
-                    continue
-                vis = _max_visible_span(t0, t1, gaps)
-                if vis <= 0:
-                    continue
-                need = text_width(r.display(v), VALUE_SIZE, mono=True) + 18
-                scale = max(scale, need / float(vis))
-    hit_cap = False
-    if span * scale > 2400:
-        scale = max(2400 / span, floor)
-        hit_cap = True
-    return scale, hit_cap
-
-
-def _scale(d: Diagram, visible_span: Fraction, gaps: list[Gap], end: Fraction) -> float:
-    return _scale_with_cap(d, visible_span, gaps, end)[0]
-
-
-def _nice_step(raw: float) -> float:
-    exp = math.floor(math.log10(raw))
-    for m in (1, 2, 5, 10):
-        if m * 10**exp >= raw:
-            return m * 10**exp
-    return 10 ** (exp + 1)
-
-
-@dataclass
-class RowBox:
-    row: Row
-    top: float
-
-    @property
-    def hi(self) -> float:
-        return self.top + WAVE_TOP
-
-    @property
-    def lo(self) -> float:
-        return self.top + WAVE_BOT
-
-    @property
-    def mid(self) -> float:
-        return self.top + (WAVE_TOP + WAVE_BOT) / 2
 
 
 class Canvas:
@@ -252,86 +101,6 @@ class Canvas:
         )
 
 
-def _clamp_cx(cx: float, half_w: float, x0: float, x_end: float) -> float:
-    if x_end - x0 >= half_w * 2 + 4:
-        return min(max(cx, x0 + half_w + 2), x_end - half_w - 2)
-    return cx
-
-
-def _wave_segments(cx: float, top: float, bottom: float, amp: float = 2.5) -> list[tuple[float, float, float, float, float, float]]:
-    """Build smooth C1-continuous sinusoidal cubic Bezier segments from top to bottom."""
-    h = bottom - top
-    n = max(4, round(h / 34))
-    dy = h / n
-    segs = []
-    for i in range(n):
-        ya = top + i * dy
-        yb = top + (i + 1) * dy
-        d = amp if i % 2 == 0 else -amp
-        segs.append((cx + d, ya + dy * 0.35, cx + d, yb - dy * 0.35, cx, yb))
-    return segs
-
-
-def _bezier_path(cx: float, top: float, bottom: float, amp: float = 2.5) -> str:
-    segs = _wave_segments(cx, top, bottom, amp)
-    parts = [f"M{fmt(cx)},{fmt(top)}"]
-    for c1x, c1y, c2x, c2y, ex, ey in segs:
-        parts.append(f"C{fmt(c1x)},{fmt(c1y)} {fmt(c2x)},{fmt(c2y)} {fmt(ex)},{fmt(ey)}")
-    return " ".join(parts)
-
-
-def _ribbon_path(cx1: float, cx2: float, top: float, bottom: float, amp: float = 2.5) -> str:
-    """Closed mask ribbon bounded by two contoured S-curves."""
-    segs1 = _wave_segments(cx1, top, bottom, amp)
-    segs2 = _wave_segments(cx2, top, bottom, amp)
-    parts = [f"M{fmt(cx1)},{fmt(top)}"]
-    for c1x, c1y, c2x, c2y, ex, ey in segs1:
-        parts.append(f"C{fmt(c1x)},{fmt(c1y)} {fmt(c2x)},{fmt(c2y)} {fmt(ex)},{fmt(ey)}")
-    parts.append(f"L{fmt(cx2)},{fmt(bottom)}")
-    # Walk segs2 backwards from bottom to top.
-    n = len(segs2)
-    h = bottom - top
-    dy = h / n
-    for i in range(n - 1, -1, -1):
-        ya = top + i * dy
-        yb = top + (i + 1) * dy
-        d = amp if i % 2 == 0 else -amp
-        parts.append(f"C{fmt(cx2 + d)},{fmt(yb - dy * 0.35)} {fmt(cx2 + d)},{fmt(ya + dy * 0.35)} {fmt(cx2)},{fmt(ya)}")
-    parts.append("Z")
-    return " ".join(parts)
-
-
-def _is_dark(theme: dict[str, str]) -> bool:
-    r, g, b = (int(theme["bg"][i : i + 2], 16) for i in (1, 3, 5))
-    return 0.2126 * r + 0.7152 * g + 0.0722 * b < 128
-
-
-def _bezier_pt(
-    x1: float,
-    y1: float,
-    c1: tuple[float, float],
-    c2: tuple[float, float],
-    x2: float,
-    y2: float,
-    t: float,
-) -> tuple[float, float]:
-    u = 1.0 - t
-    px = u**3 * x1 + 3 * u**2 * t * c1[0] + 3 * u * t**2 * c2[0] + t**3 * x2
-    py = u**3 * y1 + 3 * u**2 * t * c1[1] + 3 * u * t**2 * c2[1] + t**3 * y2
-    return px, py
-
-
-Box2D = tuple[float, float, float, float]  # cx, cy, half_w, half_h
-
-
-def _collides(cx: float, cy: float, hw: float, hh: float, obstacles: list[Box2D]) -> int:
-    hits = 0
-    for ox, oy, ohw, ohh in obstacles:
-        if abs(cx - ox) < hw + ohw + 4 and abs(cy - oy) < hh + ohh + 3:
-            hits += 1
-    return hits
-
-
 def render(d: Diagram) -> str:
     return render_with_stats(d)[0]
 
@@ -339,159 +108,23 @@ def render(d: Diagram) -> str:
 def render_with_stats(d: Diagram) -> tuple[str, RenderStats]:
     c = THEMES[d.theme]
     is_dark = _is_dark(c)
-    end = d.end
-    gaps = _merge_gaps(d.gaps, end)
-    visible_span = end - sum((g.end - g.start for g in gaps), Fraction(0))
-    scale, hit_cap = _scale_with_cap(d, visible_span, gaps, end)
-    stats = RenderStats(px_per_ns=scale / 1e9, hit_width_cap=hit_cap)
-
-    markers = [a for a in d.annotations if isinstance(a, Marker) and Fraction(0) <= a.time <= end]
-    measures = [a for a in d.annotations if isinstance(a, Measure) and a.end > 0 and a.start < end]
-    arrows = [
-        a
-        for a in d.annotations
-        if isinstance(a, Arrow)
-        and Fraction(0) <= a.src.time <= end
-        and Fraction(0) <= a.dst.time <= end
-    ]
-    regions = [a for a in d.annotations if isinstance(a, Region) and a.end > 0 and a.start < end]
-    notes = [a for a in d.annotations if isinstance(a, Note) and Fraction(0) <= a.time <= end]
-
-    # ---- horizontal time mapping & left label width ----
-    label_w = 0.0
-    open_names: list[str] = []
-    for row in d.rows:
-        common = 0
-        while common < len(open_names) and common < len(row.groups) and open_names[common] == row.groups[common]:
-            common += 1
-        del open_names[common:]
-        for depth in range(common, len(row.groups)):
-            gname = row.groups[depth]
-            label_w = max(label_w, depth * INDENT + text_width(gname, 12))
-            open_names.append(gname)
-        is_ascii = all(ord(ch) < 128 for ch in row.label)
-        label_w = max(label_w, len(row.groups) * INDENT + text_width(row.label, LABEL_SIZE, mono=is_ascii))
-
-    x0 = PAD + label_w + 22
-    tm = TimeMap(x0, scale, gaps, end)
-    x_end = tm.x(end)
-
-    # ---- pack marker badges into lanes (prevent horizontal collisions) ----
-    marker_items: list[tuple[Marker, float, int]] = []
-    marker_lane_rights: list[float] = []
-    marker_max_right = 0.0
-    for m in sorted(markers, key=lambda mk: tm.x(mk.time)):
-        x = tm.x(m.time)
-        if not m.label:
-            marker_items.append((m, x, 0))
-            continue
-        half_w = text_width(m.label, 10.5) / 2 + 5.5
-        cx = max(x, 6.0 + half_w)
-        lane_idx = 0
-        while lane_idx < len(marker_lane_rights):
-            if marker_lane_rights[lane_idx] + 6 <= cx - half_w:
-                break
-            lane_idx += 1
-        if lane_idx == len(marker_lane_rights):
-            marker_lane_rights.append(cx + half_w)
-        else:
-            marker_lane_rights[lane_idx] = cx + half_w
-        marker_max_right = max(marker_max_right, cx + half_w)
-        marker_items.append((m, cx, lane_idx))
-    marker_band_h = (MARKER_BAND + max(0, len(marker_lane_rights) - 1) * 20) if marker_lane_rights else 0
-
-    # ---- pack non-overlapping measures into shared horizontal lanes ----
-    measure_lanes: list[list[tuple[float, float]]] = []
-    measure_items: list[tuple[Measure, int, float, float, float, str, bool]] = []
-    for m in measures:
-        x1 = tm.x(max(m.start, Fraction(0)))
-        x2 = tm.x(min(m.end, end))
-        label = m.label or format_time(m.end - m.start, d.timescale)
-        half_w = text_width(label, 10.5) / 2 + 5.5
-        inline = (x2 - x1) >= text_width(label, 10.5) + 32
-        cx = _clamp_cx((x1 + x2) / 2, half_w, x0, x_end)
-        occ_l = min(x1, cx - half_w)
-        occ_r = max(x2, cx + half_w)
-        lane_idx = 0
-        while lane_idx < len(measure_lanes):
-            if all(occ_r + 8 <= la or occ_l - 8 >= lb for la, lb in measure_lanes[lane_idx]):
-                break
-            lane_idx += 1
-        if lane_idx == len(measure_lanes):
-            measure_lanes.append([])
-        measure_lanes[lane_idx].append((occ_l, occ_r))
-        measure_items.append((m, lane_idx, x1, x2, cx, label, inline))
-
-    # ---- vertical layout: title, marker band, group headers and rows ----
-    y = PAD
-    title_y = None
-    if d.title:
-        title_y = y + 19
-        y += TITLE_H
-    y += marker_band_h
-    if d.rows and any(a.src.signal is a.dst.signal and a.src.signal is d.rows[0] for a in arrows):
-        y += 14
-    if d.rows and not d.rows[0].groups and any(n.row is d.rows[0] for n in notes):
-        y += 18
-    rows_top = y
-
-    boxes: list[RowBox] = []
-    headers: list[tuple[str, int, float]] = []  # name, depth, top
-    brackets: list[tuple[int, float, float]] = []  # depth, top, bottom
-    open_groups: list[tuple[str, float]] = []
-    for row in d.rows:
-        common = 0
-        while (
-            common < len(open_groups)
-            and common < len(row.groups)
-            and open_groups[common][0] == row.groups[common]
-        ):
-            common += 1
-        while len(open_groups) > common:
-            _, top = open_groups.pop()
-            brackets.append((len(open_groups), top, y))
-        for depth in range(common, len(row.groups)):
-            name = row.groups[depth]
-            headers.append((name, depth, y))
-            open_groups.append((name, y + GROUP_H))
-            y += GROUP_H
-        boxes.append(RowBox(row, y))
-        y += ROW_H
-    while open_groups:
-        _, top = open_groups.pop()
-        brackets.append((len(open_groups), top, y))
-    rows_bottom = y
-
-    lanes_top = rows_bottom + 8
-    axis_y = lanes_top + len(measure_lanes) * LANE_H + 8
-    height = axis_y + AXIS_H + PAD
-
-    captions_top: float | None = None
-    caption_right = 0.0
-    if d.captions:
-        captions_top = axis_y + AXIS_H + CAPTION_TOP_GAP
-        height = captions_top + len(d.captions) * CAPTION_LINE_H + PAD - 4
-        caption_right = max(PAD + text_width(line, CAPTION_SIZE) + PAD for line in d.captions)
-
-    note_min_right = max(x0 + text_width(n.label, 10.5) + 16 + PAD for n in notes) if notes else 0.0
-    title_right = (PAD + text_width(d.title, 15.5) + PAD) if d.title else 0.0
-    width = max(
-        x_end + PAD + 26,
-        title_right,
-        marker_max_right + PAD if marker_max_right else 0.0,
-        caption_right,
-        note_min_right,
-    )
-    stats.width = round(width, 2)
-    stats.height = round(height, 2)
+    lay: DiagramLayout = compute_layout(d)
+    stats = lay.stats
+    tm = lay.tm
+    x0, x_end = lay.x0, lay.x_end
+    width, height = lay.width, lay.height
+    rows_top, rows_bottom = lay.rows_top, lay.rows_bottom
+    axis_y = lay.axis_y
+    end = lay.end
+    boxes = lay.boxes
+    by_row = lay.by_row
 
     cv = Canvas(c, pfx=f"wv-{d.theme}-")
-    by_row = {id(b.row): b for b in boxes}
 
     # ---- background, title ----
     cv.add(f'<rect width="100%" height="100%" fill="{c["bg"]}"/>')
-    if title_y is not None:
-        cv.text(PAD, title_y, d.title, c["title"], size=15.5, weight="600")
+    if lay.title_y is not None:
+        cv.text(PAD, lay.title_y, d.title, c["title"], size=15.5, weight="600")
 
     # ---- viewport backdrop & alternating row stripes ----
     if boxes:
@@ -510,7 +143,7 @@ def render_with_stats(d: Diagram) -> tuple[str, RenderStats]:
     # ---- grid on the first clock's rising edges ----
     first_clock = next((r for r in d.rows if isinstance(r, Clock)), None)
     if first_clock is not None and boxes:
-        if float(first_clock.period) * scale >= 10:
+        if float(first_clock.period) * lay.scale >= 10:
             for a, b in tm.visible():
                 for t, kind in first_clock.edges_between(a - Fraction(1, 10**18), b):
                     if kind == "rise":
@@ -521,9 +154,9 @@ def render_with_stats(d: Diagram) -> tuple[str, RenderStats]:
         cv.line(x0, rows_top, x0, rows_bottom, c["border"], width=1, opacity=0.65)
 
     # ---- labels and group headers ----
-    for name, depth, top in headers:
+    for name, depth, top in lay.headers:
         cv.text(PAD + depth * INDENT, top + 17, name, c["group"], size=12, weight="600")
-    for depth, top, bottom in brackets:
+    for depth, top, bottom in lay.brackets:
         bx = PAD + depth * INDENT + 3
         cv.add(
             f'<path d="M{fmt(bx + 4)},{fmt(top + 2)} H{fmt(bx)} V{fmt(bottom - 5)} H{fmt(bx + 4)}" '
@@ -543,7 +176,7 @@ def render_with_stats(d: Diagram) -> tuple[str, RenderStats]:
 
     # ---- region boxes sit under the waves ----
     reg_fill_op = "0.11" if is_dark else "0.09"
-    for a in regions:
+    for a in lay.regions:
         b = by_row[id(a.row)]
         x1, x2 = tm.x(max(a.start, Fraction(0))), tm.x(min(a.end, end))
         cv.add(
@@ -562,21 +195,40 @@ def render_with_stats(d: Diagram) -> tuple[str, RenderStats]:
         else:
             _draw_bus(cv, b, b.row, tm, end, bus_labels, d.timescale, stats)
 
+    # ---- marker label boxes (for region/note collision checks) ----
+    marker_labels: list[Box2D] = [
+        (cx, (rows_top - 8 - lane_idx * 20) - 1.8, text_width(m.label, 10.5) / 2 + 5.5, 7.1)
+        for m, cx, lane_idx in lay.marker_items
+        if m.label
+    ]
+
     # ---- region labels sit cleanly above the waves ----
     region_labels: list[Box2D] = []
-    for a in regions:
+    for a in lay.regions:
         if a.label:
             b = by_row[id(a.row)]
             x1, x2 = tm.x(max(a.start, Fraction(0))), tm.x(min(a.end, end))
             hw = text_width(a.label, 10) / 2
             cx = _clamp_cx((x1 + x2) / 2, hw, x0, x_end)
             cy = b.hi - 6.5
+            box = (cx, cy - 3.5, hw, 6.5)
+            hits = _collides(*box, region_labels + marker_labels)
+            if hits > 0:
+                stats.crowded_regions.append(
+                    {
+                        "row": a.row.name,
+                        "start": format_time(a.start, d.timescale),
+                        "end": format_time(a.end, d.timescale),
+                        "label": a.label,
+                        "overlaps": hits,
+                    }
+                )
             cv.text(cx, cy, a.label, c["region_text"], size=10, anchor="middle", weight="600")
-            region_labels.append((cx, cy - 3.5, hw, 6.5))
+            region_labels.append(box)
 
     # ---- axis line, then contoured S-curve gaps cover waves and axis ----
     cv.line(x0, axis_y, x_end, axis_y, c["border"], width=1.1)
-    for g in gaps:
+    for g in lay.gaps:
         gx = tm.x(g.start)
         top, bottom = rows_top - 2, axis_y + 6
         cx1, cx2 = gx + 6.5, gx + 13.5
@@ -589,7 +241,7 @@ def render_with_stats(d: Diagram) -> tuple[str, RenderStats]:
 
     # ---- axis ticks ----
     unit = TIME_UNITS[d.timescale]
-    step = _nice_step(40 / scale / float(unit)) * float(unit)
+    step = _nice_step(40 / lay.scale / float(unit)) * float(unit)
     step_f = Fraction(str(step))
     step_in_unit = float(step_f / unit)
     tick_digits = max(3, -math.floor(math.log10(step_in_unit)) + 1) if step_in_unit > 0 else 3
@@ -597,7 +249,7 @@ def render_with_stats(d: Diagram) -> tuple[str, RenderStats]:
         k = math.ceil(a / step_f)
         while (t := k * step_f) <= b:
             x = tm.x(t)
-            if not any(abs(x - tm.x(g.start)) < 14 or abs(x - tm.x(g.end)) < 14 for g in gaps) or t == a:
+            if not any(abs(x - tm.x(g.start)) < 14 or abs(x - tm.x(g.end)) < 14 for g in lay.gaps) or t == a:
                 cv.line(x, axis_y, x, axis_y + 4, c["muted"], width=1)
                 label = format_time(t, d.timescale, digits=tick_digits)[: -len(d.timescale)]
                 cv.text(x, axis_y + 16, label, c["muted"], size=10, anchor="middle", mono=True)
@@ -606,7 +258,7 @@ def render_with_stats(d: Diagram) -> tuple[str, RenderStats]:
 
     # ---- markers ----
     marker_xs: list[float] = []
-    for m, cx, lane_idx in marker_items:
+    for m, cx, lane_idx in lay.marker_items:
         x = tm.x(m.time)
         marker_xs.append(x)
         ty = rows_top - 8 - lane_idx * 20
@@ -628,8 +280,8 @@ def render_with_stats(d: Diagram) -> tuple[str, RenderStats]:
 
     # ---- measures (non-overlapping ones share lanes) ----
     mh_url = cv.url("mh")
-    for m, lane_idx, x1, x2, cx, label, inline in measure_items:
-        ly = lanes_top + lane_idx * LANE_H + 16
+    for m, lane_idx, x1, x2, cx, label, inline in lay.measure_items:
+        ly = lay.lanes_top + lane_idx * LANE_H + 16
         for x in (x1, x2):
             if any(abs(x - mx) <= 1.0 for mx in marker_xs):
                 cv.line(x, rows_bottom + 2, x, ly + 4, c["measure"], width=1, dash="2 3", opacity=0.35)
@@ -656,20 +308,15 @@ def render_with_stats(d: Diagram) -> tuple[str, RenderStats]:
 
     # ---- arrows ----
     arrow_labels: list[Box2D] = []
-    for a in arrows:
+    for a in lay.arrows:
         _draw_arrow(cv, a, by_row, tm, x0, x_end, region_labels, bus_labels, arrow_labels, d.timescale, stats)
 
     # ---- single-point callout notes ----
-    if notes:
-        marker_labels: list[Box2D] = [
-            (cx, (rows_top - 8 - lane_idx * 20) - 1.8, text_width(m.label, 10.5) / 2 + 5.5, 7.1)
-            for m, cx, lane_idx in marker_items
-            if m.label
-        ]
+    if lay.notes:
         note_labels: list[Box2D] = []
         min_note_cy = (PAD + TITLE_H if d.title else PAD) + 5.5
         max_note_cy = max(min_note_cy, axis_y - 10.0)
-        for n in notes:
+        for n in lay.notes:
             _draw_note(
                 cv,
                 n,
@@ -689,10 +336,10 @@ def render_with_stats(d: Diagram) -> tuple[str, RenderStats]:
             )
 
     # ---- footer captions ----
-    if captions_top is not None:
-        cv.line(PAD, captions_top - 6, width - PAD, captions_top - 6, c["border"], width=1, opacity=0.5)
+    if lay.captions_top is not None:
+        cv.line(PAD, lay.captions_top - 6, width - PAD, lay.captions_top - 6, c["border"], width=1, opacity=0.5)
         for idx, line in enumerate(d.captions):
-            cv.text(PAD, captions_top + idx * CAPTION_LINE_H + 11, line, c["marker_text"], size=CAPTION_SIZE)
+            cv.text(PAD, lay.captions_top + idx * CAPTION_LINE_H + 11, line, c["marker_text"], size=CAPTION_SIZE)
 
     hi_top = "0.18" if is_dark else "0.12"
     bus_top = "0.18" if is_dark else "0.11"
@@ -907,6 +554,12 @@ def _draw_bus(
         bus_labels.append((cx, b.mid + 2.1, text_width(label, VALUE_SIZE, mono=True) / 2, 7.5))
 
 
+def _arrow_anchor_y(b: RowBox, row: Row, time: Fraction) -> float:
+    if isinstance(row, Clock) and row._edge_kind_at(time) is None:
+        return b.hi if row.level_at(time) == 1 else b.lo
+    return b.mid
+
+
 def _draw_arrow(
     cv: Canvas,
     a: Arrow,
@@ -922,8 +575,10 @@ def _draw_arrow(
 ) -> None:
     c = cv.c
     b1, b2 = by_row[id(a.src.signal)], by_row[id(a.dst.signal)]
-    x1, y1 = tm.x(a.src.time), b1.mid
-    x2, y2 = tm.x(a.dst.time), b2.mid
+    x1 = tm.x(a.src.time)
+    y1 = _arrow_anchor_y(b1, a.src.signal, a.src.time)
+    x2 = tm.x(a.dst.time)
+    y2 = _arrow_anchor_y(b2, a.dst.signal, a.dst.time)
     same_row = b1 is b2
     lift = 22.0
     if same_row:

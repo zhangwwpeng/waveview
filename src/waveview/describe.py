@@ -28,6 +28,8 @@ def describe(d: Diagram) -> str:
             extra = f" phase={t(c.phase)}" if c.phase else ""
             if c.duty != 0.5:
                 extra += f" duty={float(c.duty):g}"
+            if c.tco:
+                extra += f" tco={t(c.tco)}"
             if c._gated:
                 if c.windows:
                     win = "、".join(
@@ -45,11 +47,14 @@ def describe(d: Diagram) -> str:
         lines.append(f"t={t(0):<10} 初始        {init}")
 
     for step in sorted(d.steps, key=lambda s: s.time):
-        changes = ", ".join(
-            f"{sig.name} {sig.display(sig.value_before(step.time))}→{sig.display(new)}"
-            for sig, _old, new in step.changes
-        )
-        lines.append(f"t={t(step.time):<10} {step.cause:<11} {changes}")
+        parts_step = []
+        for sig, _old, new in step.changes:
+            before = sig.value_before(step.time)
+            if type(before) is type(new) and before == new:
+                continue
+            parts_step.append(f"{sig.name} {sig.display(before)}→{sig.display(new)}")
+        if parts_step:
+            lines.append(f"t={t(step.time):<10} {step.cause:<11} {', '.join(parts_step)}")
 
     for g in d.gaps:
         lines.append(f"省略：{t(g.start)} ~ {t(g.end)}")

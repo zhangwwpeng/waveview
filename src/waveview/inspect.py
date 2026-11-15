@@ -122,9 +122,15 @@ def to_dict(
         layout_issues.append(
             f'注释拥挤：{item["target"]} "{item["label"]}" 与其他文字存在 {item["overlaps"]} 处重叠'
         )
-    if stats.hit_width_cap and (stats.truncated_labels or stats.dropped_labels):
+    for item in stats.crowded_regions:
         layout_issues.append(
-            "画布已达 2400px 自动宽度上限；可显式传 Diagram(px_per_ns=...) 或用 d.gap(...) 折叠长空闲"
+            f'区域拥挤：{item["row"]}@{item["start"]}~{item["end"]} "{item["label"]}" 与其他文字存在 {item["overlaps"]} 处重叠'
+        )
+    if stats.hit_width_cap and (stats.truncated_labels or stats.dropped_labels):
+        cap_px = int(d.max_width) if d.max_width and d.max_width == int(d.max_width) else d.max_width
+        layout_issues.append(
+            f"画布已达 {cap_px}px 自动宽度上限；可传 Diagram(max_width=None) 放开自适应宽度、"
+            "传 d.bus(..., pad=False) 省略前导零，或用 d.gap(...) 折叠长空闲"
         )
 
     clocks = [r for r in d.rows if isinstance(r, Clock)]
@@ -139,6 +145,7 @@ def to_dict(
             "period": format_time(c.period, ts),
             "phase": format_time(c.phase, ts),
             "duty": float(c.duty),
+            "tco": format_time(c.tco, ts),
             "gated": c._gated,
             "idle": c.idle if c._gated else None,
             "windows": [
@@ -157,6 +164,7 @@ def to_dict(
             "kind": s.kind,
             "width": s.width,
             "fmt": s.fmt if s.kind == "bus" else None,
+            "pad": s.pad if s.kind == "bus" else None,
             "init": s.display(s.init),
             "groups": list(s.groups),
             "segments": [
@@ -171,21 +179,28 @@ def to_dict(
         for s in signals
     ]
 
-    step_data = [
-        {
-            "time": format_time(step.time, ts),
-            "cause": step.cause,
-            "changes": [
+    step_data: list[dict[str, Any]] = []
+    for step in sorted(d.steps, key=lambda s: s.time):
+        step_changes: list[dict[str, Any]] = []
+        for sig, _old, new in step.changes:
+            before = sig.value_before(step.time)
+            if type(before) is type(new) and before == new:
+                continue
+            step_changes.append(
                 {
                     "signal": sig.name,
-                    "old": sig.display(sig.value_before(step.time)),
+                    "old": sig.display(before),
                     "new": sig.display(new),
                 }
-                for sig, _old, new in step.changes
-            ],
-        }
-        for step in sorted(d.steps, key=lambda s: s.time)
-    ]
+            )
+        if step_changes:
+            step_data.append(
+                {
+                    "time": format_time(step.time, ts),
+                    "cause": step.cause,
+                    "changes": step_changes,
+                }
+            )
 
     ann_data: list[dict[str, Any]] = []
     for a in d.annotations:
@@ -257,6 +272,7 @@ def to_dict(
             "dropped_labels": stats.dropped_labels,
             "crowded_arrows": stats.crowded_arrows,
             "crowded_notes": stats.crowded_notes,
+            "crowded_regions": stats.crowded_regions,
         },
         "warnings": all_warnings,
         "layout_issues": layout_issues,

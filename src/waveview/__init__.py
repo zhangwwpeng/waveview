@@ -2,5 +2,6 @@
 
 from .diagram import Diagram, Event, Instant, Wait
 from .errors import WaveError, WaveWarning
+from .model import Point
 
-__all__ = ["Diagram", "Event", "Instant", "Wait", "WaveError", "WaveWarning"]
+__all__ = ["Diagram", "Event", "Instant", "Point", "Wait", "WaveError", "WaveWarning"]

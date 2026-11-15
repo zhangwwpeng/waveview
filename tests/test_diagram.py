@@ -415,3 +415,137 @@ def test_note_and_caption_api_and_validation():
         d1.caption("   \n  ")
     with warnings.catch_warnings(record=True):
         pass
+
+
+def test_non_mutating_anchors_and_clock_arrow():
+    d = Diagram()
+    clk = d.clock("clk", period="10ns", phase="2ns")
+    sclk = d.clock("sclk", period="20ns", idle=0, start="15ns", stop="60ns")
+    sig = d.wire("sig", init=0)
+
+    d.at("5ns")
+    p_rise2 = clk.posedge(2)
+    p_fall1 = clk.negedge(1)
+    p_sig = sig.at("18ns")
+    p_clk_at = clk.at("30ns")
+    p_diag = d.point("sig")
+    p_gated = sclk.posedge(2)
+
+    # None of the above may move the cursor d.now!
+    assert d.now._time == 5 * NS
+    assert p_rise2.signal is clk and p_rise2.row is clk and p_rise2.time == 12 * NS
+    assert p_fall1.signal is clk and p_fall1.time == 7 * NS
+    assert p_sig.signal is sig and p_sig.time == 18 * NS
+    assert p_clk_at.time == 30 * NS
+    assert p_diag.signal is sig and p_diag.time == 5 * NS
+    # Gated sclk: [0, 15ns) idle=0; [10, 20) raw is 0, so rise #1=20ns, rise #2=40ns
+    assert p_gated.time == 40 * NS
+
+    e = d.at("14ns")(sig=1)
+    d.arrow(clk.posedge(2), e.sig, "t_co")
+    d.note(clk.posedge(3), "第3拍")
+    d.measure(clk.posedge(1), clk.posedge(3), "2周期")
+
+    with pytest.raises(WaveError, match="正整数"):
+        clk.posedge(0)
+    with pytest.raises(WaveError, match="正整数"):
+        clk.negedge(True)  # type: ignore[arg-type]
+    with pytest.raises(WaveError, match="负数"):
+        sig.at("-1ns")
+    with pytest.raises(WaveError, match="负数"):
+        d.point(clk, "-2ns")
+    with pytest.raises(WaveError, match="at\\(\\)"):
+        clk.at(None)
+
+
+def test_clock_and_wait_tco_delay_semantics():
+    d = Diagram()
+    clk = d.clock("clk", period="10ns", tco="1.5ns")
+    q = d.wire("q", init=0)
+
+    e1 = d.posedge(clk)(q=1)
+    assert e1._time == Fraction(3, 2) * NS
+    assert q.value_at(1 * NS) == 0
+    assert q.value_at(Fraction(3, 2) * NS) == 1
+
+    e2 = d.posedge(clk, tco="2ns")(q=0)
+    assert e2._time == 12 * NS
+
+    e3 = d.negedge(clk, tco=0)(q=1)
+    assert e3._time == 15 * NS
+
+    desc = d.describe()
+    assert "tco=1.5ns" in desc
+    assert "clk↑#1+1.5ns" in desc
+    assert "clk↑#2+2ns" in desc
+    assert "clk↓#2 " in desc
+
+    # Sampling at clock rising edges still sees registered behavior properly:
+    samples = d.sample(clk)
+    assert samples[0]["signals"]["q"] == {"sampled": "0", "after": "0", "changed": False}
+    assert samples[1]["signals"]["q"] == {"sampled": "1", "after": "1", "changed": False}
+    assert samples[2]["signals"]["q"] == {"sampled": "1", "after": "1", "changed": False}
+
+    # Validation errors on tco
+    with pytest.raises(WaveError, match="tco"):
+        d.clock("bad1", period="10ns", tco="-1ns")
+    with pytest.raises(WaveError, match="tco"):
+        d.clock("bad2", period="10ns", tco="10ns")
+    with pytest.raises(WaveError, match="tco"):
+        d.clock("bad3", period="10ns", tco=True)  # type: ignore[arg-type]
+    with pytest.raises(WaveError, match="负数"):
+        d.posedge(clk, tco="-0.5ns")
+
+
+def test_arrow_tuple_refs_and_noop_filtering():
+    d = Diagram(warn_noop=False)
+    clk = d.clock("clk", period="10ns")
+    valid = d.wire("valid", init=0)
+    ready = d.wire("ready", init=0)
+
+    d.posedge(clk)
+    e1 = d.posedge(clk)(valid=1)      # 10ns
+    e2 = d.posedge(clk)(ready=1)      # 20ns
+    e3 = d.posedge(clk)(valid=0)      # 30ns: handshake (ready stays 1)
+    w_hs = d.posedge(clk)             # 40ns: uncalled Wait
+    d.set(ready=0)                    # 40ns
+    e_noop = d.posedge(clk)(ready=0)  # 50ns: noop, still returns e_noop.ready Point
+
+    d.arrow(e1.valid, (ready, e3), "握手")
+    d.arrow(e2.ready, ("ready", w_hs), "释放")
+    assert e_noop.ready.time == 50 * NS
+
+    desc = d.describe()
+    assert "箭头：valid@10ns → ready@30ns \"握手\"" in desc
+    assert "箭头：ready@20ns → ready@40ns \"释放\"" in desc
+    assert "ready 0→0" not in desc
+    assert "clk↑#6" not in desc
+
+    steps = d.to_dict()["steps"]
+    assert all(all(ch["old"] != ch["new"] for ch in st["changes"]) for st in steps)
+
+    with pytest.raises(WaveError, match="二元组"):
+        d.arrow(e1.valid, (ready,))  # type: ignore[arg-type]
+    with pytest.raises(WaveError, match="负数"):
+        d.arrow(e1.valid, (ready, "-1ns"))
+
+
+def test_bus_pad_and_diagram_max_width():
+    d = Diagram(max_width=None)
+    bus_hex = d.bus("wdata", init=0, width=32, pad=False)
+    bus_bin = d.bus("flags", init=5, width=8, fmt="bin", pad=False)
+    d.at("10ns")(wdata=0x270F)
+
+    assert bus_hex.display(0) == "0x0"
+    assert bus_hex.display(0x270F) == "0x270F"
+    assert bus_bin.display(5) == "0b101"
+
+    with pytest.raises(WaveError, match="装不下"):
+        d.at("20ns")(wdata=1 << 32)
+    with pytest.raises(WaveError, match="负数"):
+        d.at("30ns")(wdata=-1)
+    with pytest.raises(WaveError, match="pad"):
+        d.bus("bad_pad", width=8, pad=1)  # type: ignore[arg-type]
+    for bad_max_width in (0, -100, float("nan"), float("inf"), True):
+        with pytest.raises(WaveError, match="max_width"):
+            Diagram(max_width=bad_max_width)  # type: ignore[arg-type]

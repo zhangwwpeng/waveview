@@ -17,6 +17,24 @@ def _ceil(x: Fraction) -> int:
     return math.ceil(x)
 
 
+def _resolve_row_time(diagram: Any, at: Any, negative_msg: str, require_at_msg: str | None = None) -> Fraction:
+    if at is None and require_at_msg is not None:
+        raise WaveError(require_at_msg)
+    if diagram is not None:
+        t = (diagram._now or Fraction(0)) if at is None else diagram._resolve(at)
+    elif at is None:
+        t = Fraction(0)
+    elif isinstance(at, Fraction):
+        t = at
+    else:
+        from .units import parse_time
+
+        t = parse_time(at)
+    if t < 0:
+        raise WaveError(negative_msg)
+    return t
+
+
 @dataclass(eq=False)
 class Clock:
     name: str
@@ -27,6 +45,7 @@ class Clock:
     groups: tuple[str, ...] = ()
     idle: Literal[0, 1] = 0
     windows: list[tuple[Fraction, Fraction | None]] = field(default_factory=list)
+    tco: Fraction = Fraction(0)
     _gated: bool = False
     _diagram: Any = field(default=None, repr=False)
 
@@ -40,19 +59,38 @@ class Clock:
         return 1 / self.period
 
     def _resolve_time(self, at: Any) -> Fraction:
-        if self._diagram is not None:
-            t = (self._diagram._now or Fraction(0)) if at is None else self._diagram._resolve(at)
-        elif at is None:
-            t = Fraction(0)
-        elif isinstance(at, Fraction):
-            t = at
-        else:
-            from .units import parse_time
+        return _resolve_row_time(
+            self._diagram,
+            at,
+            f'时钟 "{self.name}" 的开关时间不能是负数，收到的是 {at!r}',
+        )
 
-            t = parse_time(at)
-        if t < 0:
-            raise WaveError(f'时钟 "{self.name}" 的开关时间不能是负数，收到的是 {at!r}')
-        return t
+    def _nth_edge_time(self, kind: EdgeKind, n: int) -> Fraction:
+        if isinstance(n, bool) or not isinstance(n, int) or n < 1:
+            raise WaveError(f"边沿序号必须是正整数（从 1 开始），收到的是 {n!r}")
+        cur: Fraction | None = None
+        for _ in range(n):
+            cur, _ = self.next_edge(kind, cur)
+        assert cur is not None
+        return cur
+
+    def posedge(self, n: int = 1) -> Point:
+        """Non-mutating Point at the 1-based ``n``-th rising edge of this clock."""
+        return Point(self, self._nth_edge_time("rise", n))
+
+    def negedge(self, n: int = 1) -> Point:
+        """Non-mutating Point at the 1-based ``n``-th falling edge of this clock."""
+        return Point(self, self._nth_edge_time("fall", n))
+
+    def at(self, time: Any) -> Point:
+        """Non-mutating Point on this clock at ``time`` (no cursor mutation)."""
+        t = _resolve_row_time(
+            self._diagram,
+            time,
+            f'时钟 "{self.name}" 的锚点时间不能是负数，收到的是 {time!r}',
+            require_at_msg="at() 需要传入时间或事件，若取当前时间请写 d.point(row)",
+        )
+        return Point(self, t)
 
     def _add_window(self, ws: Fraction, we: Fraction | None) -> None:
         if we is not None and we <= ws:
@@ -248,9 +286,21 @@ class Signal:
     fmt: Literal["hex", "dec", "bin"] = "hex"
     groups: tuple[str, ...] = ()
     changes: list[Change] = field(default_factory=list)
+    pad: bool = True
+    _diagram: Any = field(default=None, repr=False)
 
     def __repr__(self) -> str:
         return f"Signal({self.name!r}, {self.kind})"
+
+    def at(self, time: Any) -> Point:
+        """Non-mutating Point on this signal at ``time`` (no cursor mutation)."""
+        t = _resolve_row_time(
+            self._diagram,
+            time,
+            f'信号 "{self.name}" 的锚点时间不能是负数，收到的是 {time!r}',
+            require_at_msg="at() 需要传入时间或事件，若取当前时间请写 d.point(row)",
+        )
+        return Point(self, t)
 
     def value_at(self, t: Fraction) -> Value:
         value = self.init
@@ -304,8 +354,8 @@ class Signal:
             if self.fmt == "dec":
                 return str(value)
             if self.fmt == "bin":
-                return "0b" + format(value, f"0{self.width}b" if self.width else "b")
-            digits = (self.width + 3) // 4 if self.width else 1
+                return "0b" + format(value, f"0{self.width}b" if (self.width and self.pad) else "b")
+            digits = (self.width + 3) // 4 if (self.width and self.pad) else 1
             return "0x" + format(value, f"0{digits}X")
         return str(value)
 
@@ -315,10 +365,14 @@ Row = Clock | Signal
 
 @dataclass(frozen=True)
 class Point:
-    """A signal's transition at one instant: what an arrow points from or to."""
+    """A point on a signal or clock at one instant, used by ``arrow()`` / ``note()``."""
 
-    signal: Signal
+    signal: Row
     time: Fraction
+
+    @property
+    def row(self) -> Row:
+        return self.signal
 
     def __repr__(self) -> str:
         from .units import format_time

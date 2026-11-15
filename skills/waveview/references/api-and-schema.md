@@ -12,38 +12,42 @@ d = Diagram(
     theme: str = "light",         # "light" | "dark" | "bamboo"
     px_per_ns: float | None = None,
     warn_noop: bool = True,
+    max_width: float | None = 2400.0,  # None uncaps auto-widening for wide 32/64-bit buses
 )
 ```
 
 ### Declarations & Groups
 
-- `d.clock(name, freq=None, period=None, phase=0, duty=0.5, label=None, idle=0, start=None, stop=None, gated=False) -> Clock`
+- `d.clock(name, freq=None, period=None, phase=0, duty=0.5, label=None, idle=0, start=None, stop=None, gated=False, tco=0) -> Clock`
   - Specify **exactly one** of `freq` (e.g. `"100MHz"`) or `period` (e.g. `"10ns"`).
+  - `tco`: default register clock-to-output propagation delay applied after `d.posedge(clk)` / `d.negedge(clk)` (`0 <= tco < period`). Can be overridden per wait via `d.posedge(clk, tco="0ns")`.
   - Gated clock options:
     - Set `idle=0` or `idle=1`, and pass `start=`/`stop=` or `gated=True` with `clk.enable(at=None)` / `clk.disable(at=None)` (default `at` = `d.now`).
 - `d.wire(name, init="x", label=None) -> Signal` (allowed values: `0`, `1`, `"0"`, `"1"`, `True`, `False`, `"x"`, `"z"`).
-- `d.bus(name, init="x", width=None, fmt="hex", label=None) -> Signal` (`fmt`: `"hex"` | `"dec"` | `"bin"`; values: non-negative `int`, `str`, `"x"`, `"z"`).
+- `d.bus(name, init="x", width=None, fmt="hex", label=None, pad=True) -> Signal` (`fmt`: `"hex"` | `"dec"` | `"bin"`; values: non-negative `int`, `str`, `"x"`, `"z"`; set `pad=False` to omit leading zeros e.g. `0x270F` on a `width=32` bus while retaining full 32-bit range checks).
 - `with d.group("Group Label"): ...` — nests row groups on the left rail.
 
 ## 2. Advancing Time & Assignments
 
 Wait methods advance/move `d.now` and return a `Wait` object; call the `Wait` object to assign signals and obtain an `Event` handle, or advance `d.now` cleanly and call `d.set(...)`:
 
-- `d.posedge(clk, n=1)(**values) -> Event`
-- `d.negedge(clk, n=1)(**values) -> Event`
+- `d.posedge(clk, n=1, *, tco=None)(**values) -> Event`
+- `d.negedge(clk, n=1, *, tco=None)(**values) -> Event`
 - `d.delay(t)(**values) -> Event`
 - `d.at(t)(**values) -> Event` (warns if jumping backward relative to `d.now`)
 - `d.gap(t)(**values) -> Event` (compresses long idle interval with a visual break mark)
 - `d.set(**values) -> Event` (assign at current `d.now`)
 - `d.now -> Instant` (current cursor timestamp)
 
-Event handles:
-- `e.req` / `e["req"]` returns a `Point(signal, time)` for annotations.
-- Only signals assigned in that specific call exist on `e`; accessing an unassigned signal raises `WaveError`.
+Event handles & non-mutating `Point` / `TimeRef` anchors (**no hardcoded `"30ns"` needed**):
+- **Every `Event`, `Point`, `Wait`, `Instant`, or `clk.posedge(n)` / `clk.negedge(n)` can be passed directly as `TimeRef`** to `d.note(row, ref, text)`, `d.region(row, start, end)`, `d.marker(ref)`, `d.measure(start, end)`, `d.point(row, ref)`, `sig.at(ref)`, and the second item of an `arrow` tuple `(row, ref)` — never hand-calculate `"30ns"` when an event handle already exists for that beat.
+- `e.req` / `e["req"]` returns a `Point(signal, time)` for that assignment. Only signals assigned in that specific call exist on `e`. If `warn_noop=False`, same-value assignments still return `e.sig` for anchoring without adding `1→1` noise to `describe()`.
+- `clk.posedge(n=1)` / `clk.negedge(n=1)` returns a non-mutating `Point(clk, edge_time)` at the 1-based `n`-th active edge (works for gated clocks too).
+- `clk.at(t)` / `sig.at(t)` / `d.point(row_or_name, at=None)` returns a non-mutating `Point` at `t` (or `d.now`).
 
 ## 3. Annotations & Rendering
 
-- `d.arrow(src: Point, dst: Point, label: str | None = None)`
+- `d.arrow(src: PointRef, dst: PointRef, label: str | None = None)` — accepts any `Point` (e.g. `e1.req`, `clk.posedge(2)`) **or** `(row_or_name, TimeRef)` tuple (e.g. `(ready, e_hs)` or `("awready", clk.posedge(4))` when a signal stays unchanged on the handshake beat).
 - `d.region(row: Row | str, start: TimeRef, end: TimeRef, label: str | None = None)`
 - `d.marker(at: TimeRef | None = None, label: str | None = None)` (`at=None` uses `d.now`)
 - `d.measure(start: TimeRef, end: TimeRef, label: str | None = None)`
@@ -108,7 +112,8 @@ Event handles:
     "truncated_labels": [],
     "dropped_labels": [],
     "crowded_arrows": [],
-    "crowded_notes": []
+    "crowded_notes": [],
+    "crowded_regions": []
   },
   "warnings": [],
   "layout_issues": [],
@@ -120,6 +125,7 @@ Event handles:
       "period": "20ns",
       "phase": "0ns",
       "duty": 0.5,
+      "tco": "0ns",
       "gated": false,
       "idle": null,
       "windows": [],
@@ -133,6 +139,7 @@ Event handles:
       "kind": "bus",
       "width": 16,
       "fmt": "hex",
+      "pad": true,
       "init": "x",
       "groups": ["APB"],
       "segments": [
@@ -169,6 +176,28 @@ Event handles:
 ```
 
 ## 5. Copy-Ready Protocol Templates
+
+### Setup / Hold / $t_{co}$ Register Timing
+
+```python
+from waveview import Diagram
+
+d = Diagram("Flip-Flop Setup / Hold / tco", theme="bamboo")
+clk = d.clock("clk", period="10ns", tco="1.5ns")
+d_in = d.wire("d", init=0, label="D (in)")
+q_out = d.wire("q", init=0, label="Q (out)")
+
+e_setup = d.at("7ns")(d=1)
+e_q = d.posedge(clk)(q=1)      # clk↑#2 @10ns -> Q toggles @11.5ns (tco=1.5ns)
+e_hold = d.at("13ns")(d=0)
+d.posedge(clk)(q=0)            # clk↑#3 @20ns -> Q toggles @21.5ns
+
+d.measure(e_setup, clk.posedge(2), "t_su")
+d.measure(clk.posedge(2), e_hold, "t_h")
+d.arrow(clk.posedge(2), e_q.q, "t_co")
+d.note(clk.posedge(2), "posedge #2")
+d.caption("Note: Q switches 1.5ns after clk↑ due to flip-flop clock-to-Q delay (t_co).")
+```
 
 ### Valid / Ready Handshake
 
@@ -228,4 +257,51 @@ for bit in (0, 1, 1, 0):
 d.posedge(sclk)
 sclk.disable(d.now)
 d.delay("20ns")(cs_n=1, mosi=0)
+```
+
+### AXI4 Multi-Channel Write Burst (AW + W 2-beat + B)
+
+Notice the RTL sampling rule: **assignments at `posedge k` settle after edge `k` and are sampled (`sampled`) at `posedge k+1`**. When `READY` already holds `1` on the handshake edge (so `READY` has no assignment in `e_hs`), pass `(awready, e_aw_hs)` or `d.point(awready, e_aw_hs)` instead of `e_aw_hs.awready`.
+
+```python
+from waveview import Diagram
+
+d = Diagram("AXI4 Write Burst (AW + W 2-beat + B)", theme="bamboo")
+clk = d.clock("aclk", freq="100MHz")
+
+with d.group("AW"):
+    awvalid = d.wire("awvalid", init=0, label="AWVALID")
+    awready = d.wire("awready", init=0, label="AWREADY")
+    awaddr = d.bus("awaddr", init="x", width=32, pad=False, label="AWADDR[31:0]")
+
+with d.group("W"):
+    wvalid = d.wire("wvalid", init=0, label="WVALID")
+    wready = d.wire("wready", init=0, label="WREADY")
+    wdata = d.bus("wdata", init="x", width=32, pad=False, label="WDATA[31:0]")
+    wlast = d.wire("wlast", init=0, label="WLAST")
+
+with d.group("B"):
+    bvalid = d.wire("bvalid", init=0, label="BVALID")
+    bready = d.wire("bready", init=0, label="BREADY")
+    bresp = d.bus("bresp", init="x", label="BRESP")
+
+d.posedge(clk)
+e_aw = d.posedge(clk)(awvalid=1, awaddr=0x2000)
+e_w0 = d.posedge(clk)(awready=1, wvalid=1, wdata=0x270F)
+e_aw_hs = d.posedge(clk)(awvalid=0, awaddr="x", wready=1)
+e_w0_hs = d.posedge(clk)(wdata=0x2710, wlast=1, bready=1)
+e_w1_hs = d.posedge(clk)(wvalid=0, wready=0, wdata="x", wlast=0)
+e_b = d.posedge(clk)(bvalid=1, bresp="OKAY")
+e_b_hs = d.posedge(clk)(bvalid=0, bresp="x")
+d.posedge(clk)(awready=0, bready=0)
+
+d.arrow(e_aw.awvalid, (awready, e_aw_hs), "AW hs")
+d.arrow(e_w1_hs.wlast, e_b.bvalid, "Wlast -> B")
+d.arrow(e_b.bvalid, (bready, e_b_hs), "B hs")
+d.region(wdata, e_w0, e_w1_hs, "W 2-beat")
+d.note(e_aw_hs.awvalid, "sampled both=1")
+d.caption(
+    "Note 1: Assignments on edge k take effect after edge k and are sampled on edge k+1.",
+    "Note 2: (awready, e_aw_hs) and (bready, e_b_hs) anchor arrows on edges where READY stays constant.",
+)
 ```

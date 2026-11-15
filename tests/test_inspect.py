@@ -312,3 +312,106 @@ def test_describe_to_dict_inspect_and_crowded_notes(
     monkeypatch.setattr("sys.stdin", io.StringIO(dense_script))
     assert cli_main(["check", "-", "--strict"]) == 2
     assert "注释拥挤：" in capsys.readouterr().out
+
+
+def test_cli_commonmark_nested_fences_and_render_multiblock_warning(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+):
+    nested_markdown = """Tutorial with nested 4-backtick outer fence:
+
+````markdown
+Example syntax (must NOT execute):
+```python_wave
+syntax error ??? !!!
+```
+````
+
+Live diagram block:
+
+```python_wave
+from waveview import Diagram
+d = Diagram("Top Level Only")
+clk = d.clock("clk", period="10ns", tco="1ns")
+q = d.wire("q", init=0)
+d.posedge(clk)(q=1)
+```
+"""
+    monkeypatch.setattr("sys.stdin", io.StringIO(nested_markdown))
+    assert cli_main(["check", "-", "--format", "json", "--strict"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["title"] == "Top Level Only"
+    assert payload["clocks"][0]["tco"] == "1ns"
+
+    multi_blocks = """
+```python_wave
+from waveview import Diagram
+d = Diagram("First")
+d.wire("a", init=0)
+```
+```python_wave
+from waveview import Diagram
+d = Diagram("Second")
+d.wire("b", init=1)
+```
+"""
+    monkeypatch.setattr("sys.stdin", io.StringIO(multi_blocks))
+    assert cli_main(["render", "-", "-o", "-"]) == 0
+    captured = capsys.readouterr()
+    assert "仅输出最后一个" in captured.err
+    assert "Second" in captured.out
+    ET.fromstring(captured.out)
+
+
+def test_max_width_none_prevents_wide_bus_truncation():
+    def build(max_width):
+        d = Diagram(title="Long 32-bit Burst", max_width=max_width)
+        clk = d.clock("clk", period="10ns")
+        data = d.bus("data", init=0, width=32)
+        for i in range(1, 35):
+            d.posedge(clk)(data=0x270F + i)
+        return d
+
+    capped = build(2400.0).to_dict()
+    assert capped["canvas"]["hit_width_cap"] is True
+    assert capped["canvas"]["truncated_labels"]
+    assert any("max_width=None" in issue for issue in capped["layout_issues"])
+
+    uncapped = build(None).to_dict()
+    assert uncapped["canvas"]["hit_width_cap"] is False
+    assert uncapped["canvas"]["truncated_labels"] == []
+    assert uncapped["ok"] is True
+
+
+def test_crowded_regions_detection_and_cli_strict(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+):
+    d = Diagram(title="Crowded Regions", px_per_ns=2.0, end="40ns")
+    d.clock("clk", period="10ns")
+    wdata = d.bus("wdata", init=0, width=16, pad=False)
+    d.at("10ns")(wdata=0x10)
+    d.at("20ns")(wdata=0x20)
+    d.region(wdata, "0ns", "10ns", "burst_one")
+    d.region(wdata, "10ns", "20ns", "burst_two")
+
+    info = d.to_dict()
+    assert info["canvas"]["crowded_regions"]
+    assert any("区域拥挤：" in issue for issue in info["layout_issues"])
+    assert info["ok"] is False
+
+    script = "\n".join(
+        [
+            "from waveview import Diagram",
+            "d = Diagram(px_per_ns=2.0, end='40ns')",
+            "d.clock('clk', period='10ns')",
+            "wdata = d.bus('wdata', init=0, width=16, pad=False)",
+            "d.at('10ns')(wdata=0x10)",
+            "d.at('20ns')(wdata=0x20)",
+            "d.region(wdata, '0ns', '10ns', 'burst_one')",
+            "d.region(wdata, '10ns', '20ns', 'burst_two')",
+        ]
+    )
+    monkeypatch.setattr("sys.stdin", io.StringIO(script))
+    assert cli_main(["check", "-", "--strict"]) == 2
+    assert "区域拥挤：" in capsys.readouterr().out

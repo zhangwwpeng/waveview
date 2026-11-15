@@ -33,15 +33,16 @@ print(d.describe())
   - 支持 `start`/`stop`/`gated` 与 `idle=0|1`，以及在时间流中动态调用 `clk.enable()` / `clk.disable()`（适配 SPI `SCLK`、I2C `SCL` 等）
 - **完整的数字信号与分组**：
   - `wire` 支持 `0`、`1`、`"x"`（不定态斜线填充）、`"z"`（高阻中心虚线）
-  - `bus` 支持自动位宽校验、`hex`/`dec`/`bin` 格式化，或任意状态名字符串；段太窄时自动撑宽画布（直到 2400px 上限）
+  - `bus` 支持自动位宽校验、`hex`/`dec`/`bin` 格式化（可用 `pad=False` 省略前导零），或任意状态名字符串；段太窄时自动撑宽画布（默认上限 `max_width=2400`，可传 `None` 放开）
   - `with d.group("名称"):` 支持多级嵌套左侧括号分组
 - **丰富的标注与自动防重叠排版**：
-  - `d.arrow(e1.valid, e2.ready, "...")`：因果曲线箭头，自动避让总线值、高亮标注与其他箭头文字
-  - `d.note(e1.valid, "...")` / `d.note(clk, "20ns", "...")`：单点引线气泡注释，紧贴波形锚点、不拉通栏竖线且自动防重叠
+  - `d.arrow(src, dst, "...")`：因果曲线箭头（支持信号跳变 `e1.valid`、时钟锚点 `clk.posedge(2)` 及 `(row, TimeRef)` 二元组如 `(ready, e_hs)`），自动避让总线值、高亮标注与其他箭头文字
+  - `d.note(e1.valid, "...")` / `d.note(clk.posedge(3), "...")` / `d.note(ready, e_hs, "...")`：单点引线气泡注释，紧贴波形锚点、不拉通栏竖线且自动防重叠
   - `d.caption("注1：...", "注2：...")`：底部图注，在时间轴下方显示多行说明并自动撑高/撑宽画布
   - `d.region(sig, start, end, "...")`：区间高亮框
   - `d.marker(at, "...")`：全行虚线标记（密集标记自动错层）
   - `d.measure(start, end, "...")`：时段双向标注（互不重叠的测量自动复用同一行）
+- **时钟边沿锚点与 `tco` 输出延迟**：支持 `clk.posedge(n)` / `clk.negedge(n)` / `sig.at(...)` / `d.point(...)` 非推进式锚点定位，以及 `d.clock(..., tco="1.5ns")` / `d.posedge(clk, tco=...)` 表达触发器传播延时。
 - **三套高对比主题**：内置 `light`（浅色文档）、`dark`（深色夜景）、`bamboo`（竹林青瓷），且同一页面嵌入多张不同主题 SVG 时 `<defs>` 互不串色。
 - **多端渲染与核对闭环**：
   - `d.save("a/b.png" | "a/b.svg")`（自动创建缺失父目录）、`d.to_svg()`、`d.to_png(scale=2)`

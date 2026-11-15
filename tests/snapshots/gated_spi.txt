@@ -2,13 +2,13 @@
 时钟：sclk 20MHz（周期 50ns） phase=45ns 门控(20ns~420ns, idle=0)
 t=0ns        初始        cs_n=1 mosi=z miso=z bit=z
 t=20ns       @20ns       cs_n 1→0, mosi z→1, miso z→0, bit z→b7
-t=70ns       sclk↓#1     mosi 1→0, miso 0→0, bit b7→b6
+t=70ns       sclk↓#1     mosi 1→0, bit b7→b6
 t=120ns      sclk↓#2     mosi 0→1, miso 0→1, bit b6→b5
-t=170ns      sclk↓#3     mosi 1→0, miso 1→1, bit b5→b4
-t=220ns      sclk↓#4     mosi 0→0, miso 1→1, bit b4→b3
-t=270ns      sclk↓#5     mosi 0→1, miso 1→1, bit b3→b2
+t=170ns      sclk↓#3     mosi 1→0, bit b5→b4
+t=220ns      sclk↓#4     bit b4→b3
+t=270ns      sclk↓#5     mosi 0→1, bit b3→b2
 t=320ns      sclk↓#6     mosi 1→0, miso 1→0, bit b2→b1
-t=370ns      sclk↓#7     mosi 0→1, miso 0→0, bit b1→b0
+t=370ns      sclk↓#7     mosi 0→1, bit b1→b0
 t=420ns      sclk↓#8     mosi 1→z, miso 0→z, bit b0→z
 t=445ns      +25ns       cs_n 0→1
 测量：20ns ~ 45ns（25ns） "tCSS"

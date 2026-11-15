@@ -238,3 +238,55 @@ def test_out_of_end_note_clips_with_warning():
     ET.fromstring(svg)
     assert "VISIBLE_NOTE" in svg
     assert "OUT_OF_RANGE_NOTE" not in svg
+
+
+@pytest.mark.parametrize("theme", sorted(THEMES))
+def test_clock_anchor_arrow_note_and_tco_render_valid_svg(theme):
+    from waveview import Diagram
+
+    d = Diagram(title="Register Timing", theme=theme)
+    clk = d.clock("clk", period="10ns", tco="1.5ns")
+    d_in = d.wire("d", init=0)
+    q_out = d.wire("q", init=0)
+
+    e_d = d.at("7ns")(d=1)
+    e_q = d.posedge(clk)(q=1)      # clk↑#2 @10ns -> 11.5ns
+    d.at("13ns")(d=0)
+    d.posedge(clk)(q=0)            # clk↑#3 @20ns -> 21.5ns
+
+    d.measure(e_d, clk.posedge(2), "t_su")
+    d.arrow(clk.posedge(2), e_q.q, "t_co")
+    d.note(clk.posedge(2), "capture")
+    d.note(clk.at("25ns"), "low")
+    d.caption("Note: tco shifts registered Q transitions relative to clk posedge.")
+
+    svg = d.to_svg()
+    ET.fromstring(svg)
+    assert "t_co" in svg
+    assert "capture" in svg
+    assert "t_su" in svg
+
+
+def test_arrow_tuple_and_unpadded_32bit_bus_render_valid_svg():
+    from waveview import Diagram
+    from waveview.svg import render_with_stats
+
+    d = Diagram(title="Unpadded 32-bit Handshake", theme="bamboo")
+    clk = d.clock("clk", freq="100MHz")
+    valid = d.wire("valid", init=0)
+    ready = d.wire("ready", init=0)
+    wdata = d.bus("wdata", init="x", width=32, pad=False)
+
+    d.posedge(clk)
+    e1 = d.posedge(clk)(valid=1, wdata=0x270F)
+    d.posedge(clk)(ready=1)
+    e3 = d.posedge(clk)(valid=0, wdata="x")
+    d.posedge(clk)(ready=0)
+    d.arrow(e1.valid, (ready, e3), "hs")
+
+    svg, stats = render_with_stats(d)
+    ET.fromstring(svg)
+    assert ">0x270F<" in svg
+    assert "0x0000270F" not in svg
+    assert stats.truncated_labels == []
+    assert stats.crowded_regions == []

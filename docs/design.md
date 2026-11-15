@@ -1,6 +1,6 @@
-# waveview 设计文档 v0.1
+# waveview 设计文档
 
-> 状态：v0.1 已实现。第 15 节的问题均按默认方案处理（见该节）。
+> 说明：第 1～16 节保留了 **v0.1 初始设计规格与取舍记录**（供历史参考）；**当前已实现的完整架构、新增功能（门控时钟、`tco`、`clk.posedge(n)` 锚点、`d.note`/`d.caption`、`inspect` / `waveview` CLI、`layout.py` 分层、Skill 与精简后的 `omp` 扩展）见第 17 节。**
 
 ## 1. 目标与范围
 
@@ -314,22 +314,41 @@ d.save("cdc.png")
 - 仿 cocotb 的多过程并行写法
 - 协议高层封装（`axi_write()` 等）
 
-## 17. 当前进度（2026-11-14）
+## 17. 当前进度与最新架构（2026-11-15）
 
 完整使用说明与示例见 [docs/guide.md](guide.md)。
 
+### 当前模块分层
+```
+src/waveview/
+  __init__.py    # 导出 Diagram / Event / Instant / Point / Wait / 错误类型
+  errors.py      # 中文 WaveError / WaveWarning
+  units.py       # 时间/频率/相位解析 -> 精确 Fraction 秒
+  model.py       # 纯数据模型（Clock / Signal / Point / Annotation / Note / Gap / Step）
+  diagram.py     # Verilog 风格过程式 DSL：游标、等待、tco、赋值、非推进锚点、标注与检查
+  themes.py      # light / dark / bamboo 统一 26 键配色表
+  layout.py      # TimeMap、gap 压缩、自适应缩放、lane 排布与 DiagramLayout 计算
+  svg.py         # 只读消费 DiagramLayout 与 Canvas，输出独立作用域 <defs> 的 SVG
+  png.py         # resvg-py 导出 PNG
+  describe.py    # 按真实时间顺序生成的事件剧本
+  inspect.py     # 时钟逐拍采样（sampled vs after）与 SVG 布局自检指标
+  cli.py         # waveview check / render CLI（含 CommonMark 顶层围栏扫描）
+extensions/waveview.ts   # omp 扩展：只专注于将顶层 python_wave / waveview 围栏内联渲染为 SVG
+skills/waveview/         # TUI 画图闭环与自检 Skill 规范
+```
+
 ### 已完成
-- v0.1 库：`src/waveview/`（units、model、diagram、svg、describe、png、errors、themes），覆盖单元测试与 SVG/描述快照比对
-- 主题与渲染优化：新增/重制高对比护眼主题 `bamboo`；修复跨 SVG `<defs>` ID 串色、`wire` `0↔x` 假跳变边、跨 `gap` 总线缩放、斑马纹避让分组括号、`Measure` 非重叠泳道复用、`Marker` 防碰撞与箭头自动避让
-- 门控时钟与循环体验：`d.clock(..., start=, stop=, gated=, idle=)` 与 `clk.enable()` / `clk.disable()` 支持 SPI/I2C 等间歇时钟；新增 `Diagram(..., warn_noop=False)` 关闭循环同值警告；`save()` 自动创建父目录；实现 `_repr_svg_()` 支持 Notebook 内联显示
-- 示例：`examples/` 下 handshake（单时钟）、cdc（异步双时钟）、burst（断开 / 标记 / 高阻 / 深色）、spi（手动翻转）、gated_spi（门控时钟 + `warn_noop=False`）、apb（APB 写 / 读 + 等待周期，bamboo 主题）
-- 快照测试：`tests/snapshots/`，改了渲染后用 `UPDATE_SNAPSHOTS=1 uv run pytest` 更新
-- 对话内显示扩展：[extensions/waveview.ts](../extensions/waveview.ts) 插件（根目录 `package.json`）自动运行 ```` ```python_wave ````（不限变量名为 `d`）并内联显示 SVG；同时保留对 ```` ```img ```` 嵌入截图的支持
+- v0.1 核心与快照测试：`tests/snapshots/`，改了渲染后用 `UPDATE_SNAPSHOTS=1 uv run pytest` 更新
+- 主题与渲染优化：新增高对比护眼主题 `bamboo`；跨 SVG `<defs>` ID 隔离、`wire` `0↔x` 隔离、跨 `gap` 总线缩放、斑马纹避让分组括号、`Measure` 非重叠泳道复用、`Marker` 错层与箭头/注释防重叠排布
+- 时钟与硬件语义增强：门控时钟（`start`/`stop`/`gated`/`idle` 与 `clk.enable()`/`clk.disable()`）；统一 `Point` 支持 `clk.posedge(n)` / `clk.negedge(n)` / `clk.at()` / `sig.at()` / `d.point()`，打通时钟沿到信号跳变的因果箭头与单点注释；新增时钟/单拍 `tco` 输出延迟参数；新增单点引线注释 `d.note(...)` 与底部图注 `d.caption(...)`
+- 自检与多端集成：`waveview check / render` CLI（CommonMark 顶层围栏安全解析）、`d.sample()` / `d.to_dict()` / `d.inspect()`、`save()` 自动建目录、`Notebook` `_repr_svg_()` 与 [extensions/waveview.ts](../extensions/waveview.ts) 内联渲染
+- 仓库工程化：根目录 MIT [LICENSE](../LICENSE)、GitHub Actions CI（Linux + macOS 跑 `pytest` + `--strict` 自检）与 [skills/waveview/SKILL.md](../skills/waveview/SKILL.md)
 
 ### 历史已知问题解决情况
-1. ~~不支持门控时钟~~ → 已解决：新增 `start`/`stop`/`gated`/`idle` 与 `clk.enable()`/`clk.disable()`，见 [examples/gated_spi.py](../examples/gated_spi.py)
-2. ~~"赋值没有变化"的警告在循环里太吵~~ → 已解决：保留默认 `warn_noop=True` 检查误操作，提供 `Diagram(..., warn_noop=False)` 开关
-3. ~~箭头文字可能和区域高亮的文字重叠~~ → 已解决：箭头标注会自动检测并与区域标签、总线文字和既有箭头标签避让，且居中/边缘标签钳制在绘图区内
+1. ~~不支持门控时钟~~ → 已解决：见 [examples/gated_spi.py](../examples/gated_spi.py)
+2. ~~"赋值没有变化"的警告在循环里太吵~~ → 已解决：`Diagram(..., warn_noop=False)`
+3. ~~箭头文字可能和区域高亮的文字重叠~~ → 已解决：自动与区域标签、总线文字和既有箭头/注释避让
+4. ~~`d.arrow()` 不能从时钟沿出发，标注时钟沿要手算纳秒数~~ → 已解决：支持 `clk.posedge(n)` / `clk.negedge(n)`、`d.point(...)` 与 `tco=`
 
 ### 下一步
-- 更多长期规划（JSON 导入导出、状态机图、VCD/FST 读取、多过程并行、协议高层封装与 AI 语义比对）见第 16 节。
+- 更多长期规划（JSON 导入导出、状态机图、VCD/FST 读取、多过程并行、协议高层封装）见第 16 节。

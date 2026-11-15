@@ -17,18 +17,54 @@ from .diagram import Diagram
 from .errors import WaveError, WaveWarning
 from .inspect import inspect_diagram, to_dict
 
-_WAVE_FENCE_RE = re.compile(r"```(?:python_wave|waveview)[^\n]*\n([\s\S]*?)```")
-_PY_FENCE_RE = re.compile(r"```(?:python|py)\b[^\n]*\n([\s\S]*?)```")
+_OPEN_FENCE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
+
+
+def _scan_top_level_fences(raw: str) -> list[tuple[str, str, str]]:
+    """Return ``(fence_char, info_head, body)`` for closed top-level Markdown fences."""
+    lines = raw.splitlines(keepends=True)
+    fences: list[tuple[str, str, str]] = []
+    i = 0
+    while i < len(lines):
+        clean = lines[i].rstrip("\r\n")
+        m = _OPEN_FENCE_RE.match(clean)
+        if not m:
+            i += 1
+            continue
+        fence = m.group(1)
+        fence_char = fence[0]
+        fence_len = len(fence)
+        info = m.group(2).strip()
+        if fence_char == "`" and "`" in info:
+            i += 1
+            continue
+        close_re = re.compile(rf"^ {{0,3}}{re.escape(fence_char)}{{{fence_len},}}[ \t]*$")
+        close_idx = -1
+        for j in range(i + 1, len(lines)):
+            if close_re.match(lines[j].rstrip("\r\n")):
+                close_idx = j
+                break
+        if close_idx < 0:
+            i += 1
+            continue
+        head = info.split()[0] if info else ""
+        body = "".join(lines[i + 1 : close_idx])
+        fences.append((fence_char, head, body))
+        i = close_idx + 1
+    return fences
 
 
 def _extract_blocks(raw: str, filename: str) -> list[tuple[str, str]]:
-    blocks = _WAVE_FENCE_RE.findall(raw)
-    if blocks:
-        if len(blocks) == 1:
-            return [(filename, blocks[0])]
-        return [(f"{filename}#block-{i + 1}", b) for i, b in enumerate(blocks)]
-    if raw.lstrip().startswith("```"):
-        py_blocks = _PY_FENCE_RE.findall(raw)
+    fences = _scan_top_level_fences(raw)
+    wave_blocks = [
+        body for char, head, body in fences if char == "`" and head in ("python_wave", "waveview")
+    ]
+    if wave_blocks:
+        if len(wave_blocks) == 1:
+            return [(filename, wave_blocks[0])]
+        return [(f"{filename}#block-{i + 1}", b) for i, b in enumerate(wave_blocks)]
+    if raw.lstrip().startswith(("```", "~~~")):
+        py_blocks = [body for _, head, body in fences if head in ("python", "py")]
         if py_blocks:
             if len(py_blocks) == 1:
                 return [(filename, py_blocks[0])]
@@ -108,6 +144,11 @@ def _cmd_render(args: argparse.Namespace) -> int:
     try:
         filename, raw = _read_source(args.source)
         blocks = _extract_blocks(raw, filename)
+        if len(blocks) > 1:
+            print(
+                f"警告: 输入包含 {len(blocks)} 个代码块，render 仅输出最后一个（{blocks[-1][0]}）",
+                file=sys.stderr,
+            )
         d, exec_warnings = _run_diagram_code(blocks[-1][1], blocks[-1][0])
         for w in exec_warnings:
             print(f"警告: {w}", file=sys.stderr)

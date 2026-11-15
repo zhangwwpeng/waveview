@@ -79,6 +79,7 @@ Diagram(
     theme: str = "light",
     px_per_ns: float | None = None,
     warn_noop: bool = True,
+    max_width: float | None = 2400.0,
 )
 ```
 
@@ -88,8 +89,9 @@ Diagram(
 | `timescale` | `"ns"` | 坐标轴显示单位，同时作为裸数字时间的默认单位（可选 `fs`/`ps`/`ns`/`us`/`ms`/`s`）。 |
 | `end` | `None` | 画布结束时刻（必须 `> 0`）。为 `None` 时自动计算：有时钟则为最后时刻之后再留 **2 个最快时钟周期**；无时钟则留 `max(last / 10, 10 * unit)`。显式指定更小的 `end` 时，`check()` 会发出警告，超出 `end` 的部分不会绘制。 |
 | `theme` | `"light"` | 配色主题，内置 `"light"`、`"dark"`、`"bamboo"`（详见[第 7 节](#7-主题配色与自定义扩展)）。 |
-| `px_per_ns` | `None` | 手动指定每秒的水平缩放比例（每纳秒像素数，必须为有限正数）。为 `None` 时自动计算：确保最窄时钟半周期清晰，并按总线（`bus`）各**可见分段**的最窄文字需求自动加宽（总宽度软上限 `2400px`）。 |
-| `warn_noop` | `True` | 是否在“信号被赋予了与当前值相同的值”时发出 `WaveWarning`。在循环移位驱动协议时可设为 `False` 以减少噪音。 |
+| `px_per_ns` | `None` | 手动指定每秒的水平缩放比例（每纳秒像素数，必须为有限正数）。为 `None` 时自动计算：确保最窄时钟半周期清晰，并按总线（`bus`）各**可见分段**的最窄文字需求自动加宽（受 `max_width` 限制）。 |
+| `warn_noop` | `True` | 是否在“信号被赋予了与当前值相同的值”时发出 `WaveWarning`。设为 `False` 时不仅静音告警，`describe()` / `inspect()` 也会自动省略没有实际跳变的 `1→1` 噪声，同时仍保留返回事件 `e.sig` 的点句柄。 |
+| `max_width` | `2400.0` | 自动缩放时允许的最大时间轴像素宽度（单位 px；传 `None` 可完全放开自动展宽，避免 32/64 位长总线图截断）。 |
 
 ---
 
@@ -121,11 +123,13 @@ clk = d.clock(
     start: TimeRef | None = None,
     stop: TimeRef | None = None,
     gated: bool = False,
+    tco: str | int | float | Fraction = 0,
 )
 ```
 
 - `freq` 与 `period` **必须二选一**，不能同时写或都不写。
 - `duty` 必须在 `(0, 1)` 开区间内（不含 `0` 和 `1`）。
+- `tco` 可选，表示同步触发器相对时钟沿的默认输出传播延迟（`0 <= tco < period`）；调用 `d.posedge(clk, tco=...)` 或 `d.negedge(clk, tco=...)` 也可针对单次等待覆盖该延迟。
 - 图中声明的**第一个时钟**会在波形区背景生成竖向浅色参考网格（在其激活的上升沿位置，前提是周期宽度 `>= 10px`）。
 
 #### 门控时钟（Gated Clock）
@@ -168,10 +172,10 @@ req = d.wire("req", init=0, label=None)
 ### 4.3 多比特总线 `d.bus()`
 
 ```python
-addr = d.bus("addr", init="x", width=16, fmt="hex", label="addr[15:0]")
+addr = d.bus("addr", init="x", width=16, fmt="hex", label="addr[15:0]", pad=True)
 ```
 
-- `fmt` 支持 `"hex"`（默认，如 `0x0024`）、`"dec"`（十进制）、`"bin"`（如 `0b10100101`，按 `width` 补零）。
+- `fmt` 支持 `"hex"`（默认，如 `0x0024`）、`"dec"`（十进制）、`"bin"`（如 `0b10100101`）；默认 `pad=True` 按 `width` 补前导零，设为 `pad=False` 时保留 `width` 位宽范围检查但省略前导零（如 32 位总线显示为 `0x270F` 而非 `0x0000270F`）。
 - 若传入整数且声明了 `width`，超出 `[0, 2^width - 1]` 或传入负数都会在运行时立刻抛出友好的 `WaveError` 检查位宽溢出。
 - 也可以直接传任意文本状态（例如 `"IDLE"`、`"HEADER"`、`"CRC"`），以及 `"x"` / `"z"`。
 
@@ -195,8 +199,8 @@ with d.group("主机接口"):
 
 | 方法 | 语义（类比 Verilog） | 说明 |
 | :--- | :--- | :--- |
-| `d.posedge(clk, n=1)` | `repeat(n) @(posedge clk)` | 严格向前寻找第 `n` 个上升沿（游标尚未移动时可落在 `t = 0`）。`clk` 可传对象或时钟名字符串。 |
-| `d.negedge(clk, n=1)` | `repeat(n) @(negedge clk)` | 严格向前寻找第 `n` 个下降沿。 |
+| `d.posedge(clk, n=1, *, tco=None)` | `repeat(n) @(posedge clk)` | 严格向前寻找第 `n` 个上升沿（游标尚未移动时可落在 `t = 0`），并额外前进 `tco`（默认取 `clk.tco`）。`clk` 可传对象或时钟名字符串。 |
+| `d.negedge(clk, n=1, *, tco=None)` | `repeat(n) @(negedge clk)` | 严格向前寻找第 `n` 个下降沿，并额外前进 `tco`。 |
 | `d.delay(t)` | `#t` | 在当前游标基础上向后推移 `t`（`t >= 0`）。 |
 | `d.at(t)` | 跳转到绝对时刻 `t` | 常用于异步复位或异步事件。若 `t < 当前游标` 会发出 `WaveWarning` 提示时间往回走，但允许插入且 `describe()` 仍会按真实时间顺序准确呈现 `old→new`。 |
 | `d.gap(t)` | 推进 `t` 并折叠绘制 | 游标前进 `t`（`t > 0`），画布上把这段漫长空闲挤压为带有双波浪断口的窄带，适合展示数微秒等待前后的两个突发。 |
@@ -226,22 +230,25 @@ with d.group("主机接口"):
 每次赋值（`d.posedge(...)(...)`、`d.set(...)` 等）都会返回一个 `Event` 实例 `e`：
 
 - 通过 `e.req`、`e["req"]` 或 `e[req_signal]` 可以拿到指向该信号在这次跳变瞬间的 **`Point`** 句柄。
+- 除了从 `Event` 获取外，还可以随时通过不改变游标 `d.now` 的非推进式方法直接取 **`Point`** 锚点（可直接传给 `arrow`、`note`、`measure`、`marker`、`region`）：
+  - `clk.posedge(n=1)` / `clk.negedge(n=1)`：直接定位时钟第 `n` 个有效上升/下降沿（支持门控时钟，免去自己心算纳秒数）；
+  - `clk.at(t)` / `sig.at(t)` / `d.point(row_or_name, at=None)`：获取指定行在任意时刻的 `Point`（`at=None` 默认取 `d.now`）。
 - 可用 `req in e` 或 `"req" in e` 判断某信号是否在该事件中被赋值。
-- **常见误区**：`Event` 只包含**那条语句里真正赋了值的信号**，访问未赋值的信号会抛出明确报错；另外 `d.posedge(clk)` 没加 `(...)` 赋值时返回的是 `Wait` 而不是 `Event`，不能写 `d.posedge(clk).req`。
+- **常见误区**：`Event` 只包含**那条语句里真正赋了值的信号**，访问未赋值的信号会抛出明确报错；另外 `d.posedge(clk)` 没加 `(...)` 赋值时返回的是 `Wait` 而不是 `Event`，不能写 `d.posedge(clk).req`。不过 **任意 `Event`、`Point`、`Wait` 或 `clk.posedge(n)` 都可以直接作为 `TimeRef` 传入 `arrow` 二元组、`note`、`region`、`marker`、`measure`、`point`、`sig.at`**，完全不必手动硬编码 `"30ns"`。
 
 ### 五类图内标注与底部图注 API
 
 1. **因果箭头 `d.arrow(src, dst, label=None)`**
-   - `src` 和 `dst` 必须是通过 `Event` 取出的信号跳变 `Point`（如 `e1.valid` → `e2.ready`），不能是同一个跳变点，也不能跨图表混用。
+   - `src` 和 `dst` 支持 `Event` 跳变点（`e1.valid`）、时钟/信号锚点（`clk.posedge(2)`、`sig.at(e2)`），以及 **`(row, TimeRef)` 二元组**（如 `d.arrow(e1.valid, (ready, e3), "握手")`——适合握手沿上某信号保持稳定、没有被再次赋值的场景）；不能是同一个点，也不能跨图表混用。
    - 自动绘制平滑曲线并在中间放置带描边的文字徽章；若遇到总线文本、高亮标题或其他箭头徽章，会自动沿曲线选位或上下错开，并在绘图区左右边界内防裁切。
    - 同一根信号前后两点之间的 `arrow` 会自动画出上拱弧线。
 
 2. **单点气泡注释 `d.note(target, ...)`**
-   - 两种调用方式：直接传事件跳变点 `d.note(e.ready, "从机就绪")`，或传信号/时钟与时刻 `d.note(clk, "20ns", "采样沿")`（不画贯穿全图的竖线）。
+   - 两种调用方式：直接传点句柄（如 `d.note(e.ready, "从机就绪")` 或 `d.note(clk.posedge(3), "采样沿")`），或传信号/时钟与时刻 `d.note(clk, "20ns", "采样沿")`（不画贯穿全图的竖线）。
    - 在锚点位置画出圆点、引线与圆角标签徽章，并自动避让总线文字、区域标题、标记、因果箭头及其他注释；仍存在重叠时会在 `waveview check` 的 `crowded_notes` 中报警。
 
 3. **区间高亮 `d.region(row, start, end, label=None)`**
-   - 在指定信号或时钟行 `row`（对象或名字字符串）的 `[start, end]` 区间下方衬一层半透明虚线框，上方放标签。
+   - 在指定信号或时钟行 `row`（对象或名字字符串）的 `[start, end]` 区间下方衬一层半透明虚线框，上方放标签；若相邻区域或顶部标记标签重叠，会在 `waveview check` 的 `crowded_regions` 中报警。
    - `start` / `end` 可传任意 `TimeRef`（`Event`、`Point`、`d.now`、`Wait`、时间字符串、数字或 `Fraction`），要求 `0 <= start < end`。
 
 4. **纵向参考线 `d.marker(at=None, label=None)`**
@@ -306,7 +313,7 @@ png_bytes = d.to_png(scale=2)          # 获取 PNG 二进制字节流
   1. 有事件或标注超出了手动设置的 `end`；
   2. 某信号从未被赋值过且初值为 `"x"`（整行全是未知阴影）。
 - **`d.sample(clk, edge="rise", *, include_gaps=False)`**：按时钟有效边沿逐拍采样全部信号，返回 `[{"edge": 1, "time": "5ns", "time_s": 5e-9, "signals": {name: {"sampled": ..., "after": ..., "changed": bool}}}, ...]`，其中 `sampled` 为边沿到达前一瞬间的值（触发器采样值），`after` 为边沿后的更新值。
-- **`d.to_dict()` / `d.inspect(fmt="text" | "json")`**：一次输出 `ok`、`svg_valid`、画布尺寸与布局诊断（`truncated_labels` / `dropped_labels` / `crowded_arrows` / `crowded_notes`）、`warnings`、`layout_issues`、`steps` 及各时钟 `clock_samples`，让 AI 无需生成或读取 PNG 图片即可完成版式与时序双重验证。
+- **`d.to_dict()` / `d.inspect(fmt="text" | "json")`**：一次输出 `ok`、`svg_valid`、画布尺寸与布局诊断（`truncated_labels` / `dropped_labels` / `crowded_arrows` / `crowded_notes` / `crowded_regions`）、`warnings`、`layout_issues`、`steps` 及各时钟 `clock_samples`，让 AI 无需生成或读取 PNG 图片即可完成版式与时序双重验证。
 
 ### 8.4 CLI 命令与 Skill 封装
 
