@@ -94,7 +94,7 @@ def test_wire_zero_to_x_has_no_fake_wave_vertical_edge():
     d.posedge(clk, 2)(s="x")
     d.posedge(clk)(s=1)
     root = ET.fromstring(d.to_svg())
-    wave_color = THEMES["light"]["wave"]
+    wave_color = THEMES[d.theme]["wave"]
     wave_paths = [el.attrib["d"] for el in root.findall(".//{http://www.w3.org/2000/svg}path") if el.attrib.get("stroke") == wave_color]
     # Two disconnected traces: flat 0 segment and flat 1 segment, neither with V connecting top and bottom.
     assert len(wave_paths) == 2
@@ -167,7 +167,7 @@ def test_zebra_stripe_indents_past_group_bracket():
     alt_rects = [
         el
         for el in root.findall(".//{http://www.w3.org/2000/svg}rect")
-        if el.attrib.get("fill") == THEMES["light"]["row_alt"]
+        if el.attrib.get("fill") == THEMES[d.theme]["row_alt"]
     ]
     assert len(alt_rects) == 1
     assert float(alt_rects[0].attrib["x"]) >= 28.0
@@ -180,7 +180,7 @@ def test_sub_millisecond_ticks_format_distinctly():
     sig = d.wire("sig", init=0)
     d.at("500ns")(sig=1)
     root = ET.fromstring(d.to_svg())
-    muted = THEMES["light"]["muted"]
+    muted = THEMES[d.theme]["muted"]
     ticks = [
         el.text
         for el in root.findall(".//{http://www.w3.org/2000/svg}text")
@@ -360,7 +360,7 @@ def test_clock_draws_edge_at_zero_and_gap_end_and_all_gap_width_safe():
     clk_path = next(
         el.attrib["d"]
         for el in root.findall(".//{http://www.w3.org/2000/svg}path")
-        if el.attrib.get("stroke") == THEMES["light"]["clock"] and el.attrib.get("stroke-width") == "1.5"
+        if el.attrib.get("stroke") == THEMES[d.theme]["clock"] and el.attrib.get("stroke-width") == "1.5"
     )
     # Must contain vertical rise V<hi> at x(0) and x(30ns) (not starting already high).
     assert clk_path.startswith(f"M{lay.tm.x(lay.tm.visible()[0][0]):g},{b_clk.lo:g}") or (
@@ -490,3 +490,44 @@ def test_p1_layout_and_svg_collision_guards():
     root_cap = ET.fromstring(d_cap.to_svg())
     assert lay_cap.width <= 2400.0
     assert float(root_cap.attrib["width"]) <= 2400.0
+
+
+def test_kitty_font_renders_valid_svg_and_inspect_report(tmp_path, monkeypatch):
+    from waveview import Diagram
+    from waveview.fonts import DEFAULT_MONO, DEFAULT_SANS
+
+    kitty_conf = tmp_path / "kitty.conf"
+    kitty_conf.write_text(
+        "\n".join(
+            [
+                "    font_family      Iosevka",
+                "    symbol_map U+2E80-U+2EFF,U+3000-U+303F,U+4E00-U+9FFF LXGW WenKai Mono",
+                "    symbol_map U+2722 Menlo",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("WAVEVIEW_KITTY_CONF", str(kitty_conf))
+
+    d = Diagram(title="Kitty 字体测试")
+    clk = d.clock("clk", period="10ns")
+    req = d.wire("req", init=0)
+    d.posedge(clk)(req=1)
+
+    svg = d.to_svg()
+    root = ET.fromstring(svg)
+    families = [el.attrib["font-family"] for el in root.iter() if el.tag.endswith("text")]
+    assert families
+    expected_prefix = "'Iosevka', 'LXGW WenKai Mono', "
+    assert any(fam == f"{expected_prefix}{DEFAULT_SANS}" for fam in families)
+    assert any(fam == f"{expected_prefix}{DEFAULT_MONO}" for fam in families)
+    assert all("LXGW WenKai Mono', 'Menlo'" not in fam for fam in families)
+
+    info = d.to_dict()
+    assert info["font"] == {"families": ["Iosevka", "LXGW WenKai Mono"], "source": "kitty"}
+    assert "font=Iosevka+LXGW WenKai Mono" in d.inspect("text")
+
+    # XML-special characters in explicit font names stay valid XML.
+    d_esc = Diagram(title="Escape", font="Maple Mono & <Demo>")
+    d_esc.wire("w", init=0)
+    ET.fromstring(d_esc.to_svg())

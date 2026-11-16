@@ -8,21 +8,15 @@ from dataclasses import dataclass, field
 from fractions import Fraction
 from typing import TYPE_CHECKING, Any
 
+from .fonts import DEFAULT_MONO, DEFAULT_SANS
 from .model import Arrow, Clock, Gap, Marker, Measure, Note, Region, Row, Signal, Value
 from .units import format_time
 
 if TYPE_CHECKING:
     from .diagram import Diagram
 
-
-SANS = (
-    "-apple-system, BlinkMacSystemFont, 'SF Pro Text', 'PingFang SC', 'Hiragino Sans GB', "
-    "'Noto Sans CJK SC', 'Microsoft YaHei', Helvetica, Arial, sans-serif"
-)
-MONO = (
-    "'SF Mono', 'JetBrains Mono', Menlo, Consolas, 'DejaVu Sans Mono', "
-    "'PingFang SC', 'Hiragino Sans GB', 'Noto Sans CJK SC', monospace"
-)
+SANS = DEFAULT_SANS
+MONO = DEFAULT_MONO
 
 PAD = 20
 TITLE_H = 34

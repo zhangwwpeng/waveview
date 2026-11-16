@@ -157,3 +157,29 @@ console.log(JSON.stringify({{
     expected_tmp = os.path.realpath(tempfile.gettempdir())
     # Child cwd inside tmpdir should match resolved temp dir prefix:
     assert f"PROBE:{expected_tmp}" in res["probeOut"] or f"PROBE:{tempfile.gettempdir().rstrip('/')}" in res["probeOut"]
+
+
+def test_waveview_ts_inherits_kitty_font_conf(tmp_path: Path):
+    kitty_conf = tmp_path / "kitty.conf"
+    kitty_conf.write_text(
+        "font_family Iosevka\nsymbol_map U+4E00-U+9FFF LXGW WenKai Mono\n",
+        encoding="utf-8",
+    )
+    node_code = f"""
+import * as ext from {json.dumps(EXT.as_uri())};
+
+ext.clearWaveCache();
+process.env.WAVEVIEW_KITTY_CONF = {json.dumps(str(kitty_conf))};
+const out = ext.renderWaveBlock([
+  "from waveview import Diagram",
+  "d = Diagram(title='Kitty Font')",
+  "c = d.clock('clk', period='10ns')",
+  "w = d.wire('w', init=0)",
+  "d.posedge(c)(w=1)",
+].join("\\n"));
+console.log(JSON.stringify({{ out }}));
+"""
+    res = _run_node(node_code)
+    out = res["out"]
+    assert out.startswith("```svg\n<svg")
+    assert "'Iosevka', 'LXGW WenKai Mono', " in out

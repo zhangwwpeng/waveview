@@ -10,7 +10,7 @@ Use `waveview` for TUI waveform diagrams (```` ```python_wave ```` blocks render
 ## Quick API Cheat Sheet
 
 ```python
-d = Diagram(title="...", theme="bamboo", width=900)  # theme: light|dark|bamboo; width targets total px (mutually exclusive with px_per_ns); max_width=2400.0 (None=uncapped); warn_noop=True
+d = Diagram(title="...", theme="bamboo", width=900)  # theme: bamboo (default)|light|dark; font=None (auto kitty.conf -> built-in default, or "default"/font list); width targets total px (mutually exclusive with px_per_ns); max_width=2400.0 (None=uncapped); warn_noop=True
 clk = d.clock("clk", freq="100MHz", phase=0, duty=0.5, tco=0)  # or period="10ns"; gated=True, idle=0|1
 valid = d.wire("valid", init=0, label="VALID")                 # values: 0, 1, "x", "z"
 data = d.bus("data", init="x", width=32, fmt="hex", pad=False) # fmt: hex|dec|bin; pad=False omits leading 0s

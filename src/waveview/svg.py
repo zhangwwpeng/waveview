@@ -48,9 +48,11 @@ if TYPE_CHECKING:
 
 
 class Canvas:
-    def __init__(self, theme: dict[str, str], pfx: str = ""):
+    def __init__(self, theme: dict[str, str], pfx: str = "", sans: str = SANS, mono: str = MONO):
         self.c = theme
         self.pfx = pfx
+        self.sans = sans
+        self.mono = mono
         self.parts: list[str] = []
 
     def add(self, s: str) -> None:
@@ -94,7 +96,7 @@ class Canvas:
                 f'<rect x="{fmt(left)}" y="{fmt(y - size * 0.84)}" width="{fmt(w)}" '
                 f'height="{fmt(size * 1.34)}" rx="4" fill="{fill}" fill-opacity="0.92"{stroke_attr}/>'
             )
-        family = MONO if mono else SANS
+        family = self.mono if mono else self.sans
         extra = f' font-weight="{weight}"' if weight else ""
         self.add(
             f'<text x="{fmt(x)}" y="{fmt(y)}" fill="{color}" font-size="{size}" '
@@ -120,7 +122,7 @@ def render_with_stats(d: Diagram) -> tuple[str, RenderStats]:
     boxes = lay.boxes
     by_row = lay.by_row
 
-    cv = Canvas(c, pfx=f"wv-{d.theme}-")
+    cv = Canvas(c, pfx=f"wv-{d.theme}-", sans=d._fonts.sans, mono=d._fonts.mono)
 
     # ---- background, title ----
     cv.add(f'<rect width="100%" height="100%" fill="{c["bg"]}"/>')

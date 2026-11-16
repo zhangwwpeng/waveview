@@ -462,6 +462,7 @@ def to_dict(
         "title": d.title,
         "timescale": ts,
         "theme": d.theme,
+        "font": {"families": list(d._fonts.families), "source": d._fonts.source},
         "end": format_time(end, ts),
         "canvas": {
             "width": stats.width,
@@ -503,9 +504,10 @@ def inspect_diagram(
 
     status = "OK" if info["ok"] else ("ERROR" if not info["svg_valid"] else "WARN")
     canvas = info["canvas"]
+    font_tag = "+".join(info["font"]["families"]) if info["font"]["families"] else "default"
     lines = [
         f"[waveview check] {status} | {canvas['width']:g}x{canvas['height']:g}px | "
-        f"theme={info['theme']} | end={info['end']} | svg={'valid' if info['svg_valid'] else 'INVALID'}"
+        f"theme={info['theme']} | font={font_tag} | end={info['end']} | svg={'valid' if info['svg_valid'] else 'INVALID'}"
     ]
     if canvas["target_width"] is not None and canvas["width_drivers"]:
         reasons = "、".join(_format_width_driver(drv) for drv in canvas["width_drivers"])

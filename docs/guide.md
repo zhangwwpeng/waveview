@@ -76,11 +76,12 @@ Diagram(
     title: str | None = None,
     timescale: str = "ns",
     end: str | int | float | None = None,
-    theme: str = "light",
+    theme: str = "bamboo",
     px_per_ns: float | None = None,
     warn_noop: bool = True,
     max_width: float | None = 2400.0,
     width: float | None = None,
+    font: str | None = None,
 )
 ```
 
@@ -89,11 +90,12 @@ Diagram(
 | `title` | `None` | 画布左上角标题文本；若较长，SVG 总宽度会自动扩宽以避免右侧被裁切。 |
 | `timescale` | `"ns"` | 坐标轴显示单位，同时作为裸数字时间的默认单位（可选 `fs`/`ps`/`ns`/`us`/`ms`/`s`）。 |
 | `end` | `None` | 画布结束时刻（必须 `> 0`）。为 `None` 时自动计算：有时钟则为最后时刻之后再留 **2 个最快时钟周期**；无时钟则留 `max(last / 10, 10 * unit)`。显式指定更小的 `end` 时，`check()` 会发出警告，超出 `end` 的部分不会绘制。 |
-| `theme` | `"light"` | 配色主题，内置 `"light"`、`"dark"`、`"bamboo"`（详见[第 7 节](#7-主题配色与自定义扩展)）。 |
+| `theme` | `"bamboo"` | 配色主题，内置 `"bamboo"`（默认）、`"light"`、`"dark"`（详见[第 7 节](#7-主题配色与自定义扩展)）。 |
 | `px_per_ns` | `None` | 手动指定每秒的水平缩放比例（每纳秒像素数，必须为有限正数，与 `width` 互斥）。为 `None` 时自动计算：确保最窄时钟半周期清晰，并按总线（`bus`）各**可见分段**的最窄文字需求自动加宽（未传 `width` 时受 `max_width` 限制）。 |
 | `warn_noop` | `True` | 是否在“信号被赋予了与当前值相同的值”时发出 `WaveWarning`。设为 `False` 时不仅静音告警，`describe()` / `inspect()` 也会自动省略没有实际跳变的 `1→1` 噪声，同时仍保留返回事件 `e.sig` 的点句柄。 |
 | `max_width` | `2400.0` | 默认自动缩放（未传 `width` 时）允许的最大**总画布宽度**（单位 px，含左侧信号名与右边距；传 `None` 可完全放开自动展宽，避免 32/64 位长总线图截断）。 |
 | `width` | `None` | 期望的总画布目标像素宽度（如 `width=900`，与 `px_per_ns` 互斥）。会在扣除左侧标签栏、断轴及右边距后反推缩放比，并仍保留时钟最小周期可读性与总线文字不截断两项硬约束；若硬约束或长图注/标题超出目标宽度，会在 `inspect()` / `canvas.width_drivers` 中指出具体驱动源。 |
+| `font` | `None` | 首选字体（支持逗号分隔多字体名，自动前置在内置跨平台字体回退栈之前；按 `font > WAVEVIEW_FONT > kitty.conf > 内置默认` 解析）。未指定时会自动检测本机 Kitty 配置（`kitty.conf` 中的 `font_family` 与覆盖中文区 `U+4E00-U+9FFF` 的 `symbol_map`），若无 Kitty 配置则回落内置系统字体；传 `"default"` 可强制使用内置默认字体。 |
 
 ---
 
@@ -273,9 +275,9 @@ with d.group("主机接口"):
 
 | 主题名 | 风格与适用场景 | 核心色彩特点 |
 | :--- | :--- | :--- |
-| `"light"` | 清爽浅白文档风（默认） | 纯白底 + 柔和浅灰斑马纹，适合嵌入 README、论文、技术 Wiki、打印输出。 |
+| `"light"` | 清爽浅白文档风 | 纯白底 + 柔和浅灰斑马纹，适合嵌入 README、论文、技术 Wiki、打印输出。 |
 | `"dark"` | 深邃极客暗夜风 | 深海蓝黑底 + 亮天蓝单线/冰蓝总线，适合深色终端与演示文稿。 |
-| `"bamboo"` | **竹林青瓷护眼暗色风** | 墨竹深苔绿背景层次 + 新篁翠竹绿（`#8fb573`）单线 + 青瓷玉色（`#62bdb0`）总线 + 暖象牙白（`#f1e9d2`）标题，柔和耐看且对比清晰。 |
+| `"bamboo"` | **竹林青瓷护眼暗色风**（默认） | 墨竹深苔绿背景层次 + 新篁翠竹绿（`#8fb573`）单线 + 青瓷玉色（`#62bdb0`）总线 + 暖象牙白（`#f1e9d2`）标题，柔和耐看且对比清晰。 |
 
 同一 HTML / Markdown 页面中同时内联渲染多种主题的 SVG 时，`waveview` 会自动为每套主题的渐变、斜线纹理和箭头 `<defs>` 加上 `wv-{theme}-` 前缀，彻底避免跨图串色。
 

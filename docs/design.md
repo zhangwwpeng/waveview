@@ -326,7 +326,7 @@ src/waveview/
   units.py       # 时间/频率/相位解析 -> 精确 Fraction 秒
   model.py       # 纯数据模型（Clock / Signal / Point / Annotation / Note / Gap / Step）
   diagram.py     # Verilog 风格过程式 DSL：游标、等待、tco、赋值、非推进锚点、标注与检查
-  themes.py      # light / dark / bamboo 统一 26 键配色表
+  themes.py      # bamboo（默认） / light / dark 统一 26 键配色表
   layout.py      # TimeMap、gap 压缩、自适应缩放、lane 排布与 DiagramLayout 计算
   svg.py         # 只读消费 DiagramLayout 与 Canvas，输出独立作用域 <defs> 的 SVG
   png.py         # resvg-py 导出 PNG

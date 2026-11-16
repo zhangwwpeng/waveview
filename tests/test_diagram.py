@@ -210,6 +210,7 @@ def test_gap_advances_cursor():
 def test_theme_names_come_from_palettes():
     from waveview.themes import THEMES
 
+    assert Diagram().theme == "bamboo"
     base = set(THEMES["light"])
     for name, palette in THEMES.items():
         assert set(palette) == base, f"theme {name} 的配色键和 light 不一致"
@@ -657,3 +658,114 @@ def test_p3_api_consistency():
         d_bus.posedge(c_bus)(b8="0x")
     d_bus.posedge(c_bus)(b8="IDLE")
     assert b8.value_at(50 * NS) == "IDLE"
+
+
+def test_kitty_conf_font_parsing_and_overrides(tmp_path, monkeypatch):
+    from waveview.fonts import DEFAULT_MONO, DEFAULT_SANS, find_kitty_conf
+
+    # 1. Missing kitty.conf falls back cleanly to built-in default stacks.
+    missing = tmp_path / "missing.conf"
+    monkeypatch.setenv("WAVEVIEW_KITTY_CONF", str(missing))
+    d_def = Diagram()
+    assert d_def._fonts.families == ()
+    assert d_def._fonts.source == "default"
+    assert d_def._fonts.sans == DEFAULT_SANS
+    assert d_def._fonts.mono == DEFAULT_MONO
+
+    # 2. Classic kitty.conf with indented font_family, CJK symbol_map, and non-CJK symbol_map.
+    kitty_conf = tmp_path / "kitty.conf"
+    kitty_conf.write_text(
+        "\n".join(
+            [
+                "#: font section",
+                "    font_family      Iosevka",
+                "    symbol_map U+2E80-U+2EFF,U+3000-U+303F,U+4E00-U+9FFF LXGW WenKai Mono",
+                "    symbol_map U+2722,U+2733 Menlo",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("WAVEVIEW_KITTY_CONF", str(kitty_conf))
+    d_kitty = Diagram()
+    assert d_kitty._fonts.families == ("Iosevka", "LXGW WenKai Mono")
+    assert d_kitty._fonts.source == "kitty"
+    assert d_kitty._fonts.sans.startswith("'Iosevka', 'LXGW WenKai Mono', ")
+    assert d_kitty._fonts.mono.startswith("'Iosevka', 'LXGW WenKai Mono', ")
+    assert "'Menlo'" not in d_kitty._fonts.sans
+
+    # 3. kitten choose-fonts syntax, font_family auto reset, line continuations, and recursive/cyclic include.
+    sub_dir = tmp_path / "sub"
+    sub_dir.mkdir()
+    inc_conf = sub_dir / "fonts.conf"
+    inc_conf.write_text(
+        "\n".join(
+            [
+                'font_family family="IBM Plex Mono" style=Regular features="-liga"',
+                "symbol_map U+2E80-U+2EFF, \\",
+                "    U+4E00-U+9FFF Noto Sans CJK SC",
+                "include ../main_choose.conf",  # cycle back to main_choose.conf must not infinite-loop
+            ]
+        ),
+        encoding="utf-8",
+    )
+    main_choose = tmp_path / "main_choose.conf"
+    main_choose.write_text(
+        "\n".join(
+            [
+                "font_family OldFont",
+                "font_family auto",
+                "include sub/fonts.conf",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("WAVEVIEW_KITTY_CONF", str(main_choose))
+    d_choose = Diagram()
+    assert d_choose._fonts.families == ("IBM Plex Mono", "Noto Sans CJK SC")
+    assert d_choose._fonts.source == "kitty"
+
+    # font_family auto alone resets prior primary font.
+    auto_conf = tmp_path / "auto.conf"
+    auto_conf.write_text("font_family Iosevka\nfont_family auto\n", encoding="utf-8")
+    monkeypatch.setenv("WAVEVIEW_KITTY_CONF", str(auto_conf))
+    d_auto = Diagram()
+    assert d_auto._fonts.families == ()
+    assert d_auto._fonts.source == "default"
+
+    # 4. KITTY_CONFIG_DIRECTORY discovery when WAVEVIEW_KITTY_CONF is unset.
+    cfg_dir = tmp_path / "kitty_dir"
+    cfg_dir.mkdir()
+    (cfg_dir / "kitty.conf").write_text("font_family JetBrains Mono\n", encoding="utf-8")
+    monkeypatch.delenv("WAVEVIEW_KITTY_CONF", raising=False)
+    monkeypatch.setenv("KITTY_CONFIG_DIRECTORY", str(cfg_dir))
+    assert find_kitty_conf() == cfg_dir / "kitty.conf"
+    d_dir = Diagram()
+    assert d_dir._fonts.families == ("JetBrains Mono",)
+    assert d_dir._fonts.source == "kitty"
+
+    # 5. Argument and WAVEVIEW_FONT overrides, plus validation errors.
+    monkeypatch.setenv("WAVEVIEW_KITTY_CONF", str(kitty_conf))
+    d_default_override = Diagram(font="default")
+    assert d_default_override._fonts.families == ()
+    assert d_default_override._fonts.source == "default"
+
+    monkeypatch.setenv("WAVEVIEW_FONT", "Fira Code, PingFang SC")
+    d_env = Diagram()
+    assert d_env._fonts.families == ("Fira Code", "PingFang SC")
+    assert d_env._fonts.source == "env"
+
+    d_arg = Diagram(font="Maple Mono, LXGW WenKai")
+    assert d_arg._fonts.families == ("Maple Mono", "LXGW WenKai")
+    assert d_arg._fonts.source == "argument"
+
+    d_force_kitty = Diagram(font="kitty")
+    assert d_force_kitty._fonts.families == ("Iosevka", "LXGW WenKai Mono")
+    assert d_force_kitty._fonts.source == "kitty"
+
+    for bad_font in ("", "   ", ",,,"):
+        with pytest.raises(WaveError, match="非空"):
+            Diagram(font=bad_font)
+    with pytest.raises(WaveError, match="字符串"):
+        Diagram(font=123)  # type: ignore[arg-type]
+    with pytest.raises(WaveError, match="控制字符"):
+        Diagram(font="bad\x00font")

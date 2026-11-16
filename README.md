@@ -43,7 +43,7 @@ print(d.describe())
   - `d.marker(at, "...")`：全行虚线标记（密集标记自动错层）
   - `d.measure(start, end, "...")`：时段双向标注（互不重叠的测量自动复用同一行）
 - **时钟边沿锚点与 `tco` 输出延迟**：支持 `clk.posedge(n)` / `clk.negedge(n)` / `sig.at(...)` / `d.point(...)` 非推进式锚点定位，以及 `d.clock(..., tco="1.5ns")` / `d.posedge(clk, tco=...)` 表达触发器传播延时。
-- **三套高对比主题**：内置 `light`（浅色文档）、`dark`（深色夜景）、`bamboo`（竹林青瓷），且同一页面嵌入多张不同主题 SVG 时 `<defs>` 互不串色。
+- **三套高对比主题与自动终端字体同步**：内置 `bamboo`（竹林青瓷，默认）、`light`（浅色文档）、`dark`（深色夜景），同一页面嵌入多张不同主题 SVG 时 `<defs>` 互不串色；未显式指定 `Diagram(..., font=...)` 时会自动读取本机 Kitty `kitty.conf` 中的 `font_family` 与中文 `symbol_map` 字体并前置到 SVG 字体栈，无 Kitty 配置时自动回退内置系统字体（也可用 `font="default"` 或 `WAVEVIEW_FONT` 覆盖）。
 - **多端渲染与核对闭环**：
   - `d.save("a/b.png" | "a/b.svg")`（自动创建缺失父目录）、`d.to_svg()`、`d.to_png(scale=2)`
   - 支持 Jupyter / IPython / Marimo 自动内联显示（`_repr_svg_()`）

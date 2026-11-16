@@ -36,6 +36,7 @@ from .model import (
     Step,
     Value,
 )
+from .fonts import resolve_fonts
 from .themes import THEMES
 from .units import TIME_UNITS, format_time, parse_freq, parse_phase, parse_time
 
@@ -183,11 +184,12 @@ class Diagram:
         title: str | None = None,
         timescale: str = "ns",
         end: str | int | float | Fraction | None = None,
-        theme: str = "light",
+        theme: str = "bamboo",
         px_per_ns: float | None = None,
         warn_noop: bool = True,
         max_width: float | None = 2400.0,
         width: float | None = None,
+        font: str | None = None,
     ):
         self._seq = next(_DIAGRAM_SEQ)
         if timescale not in TIME_UNITS:
@@ -205,6 +207,10 @@ class Diagram:
             )
         if max_width is not None:
             max_width = _positive_finite(max_width, "max_width")
+        if font is not None:
+            _check_text(font, "font ")
+        self._fonts = resolve_fonts(font)
+        self.font: str | None = font.strip() if isinstance(font, str) else None
         self.title = _clean_opt_label(title, "title ")
         self.timescale = timescale
         self.theme = theme

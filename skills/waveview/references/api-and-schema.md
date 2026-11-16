@@ -9,11 +9,12 @@ d = Diagram(
     title: str | None = None,
     timescale: str = "ns",        # "ps" | "ns" | "us" | "ms" | "s"
     end: str | int | float | None = None,
-    theme: str = "light",         # "light" | "dark" | "bamboo"
+    theme: str = "bamboo",        # "bamboo" (default) | "light" | "dark"
     px_per_ns: float | None = None,
     warn_noop: bool = True,
     max_width: float | None = 2400.0,  # None uncaps auto-widening for wide 32/64-bit buses
     width: float | None = None,        # Target total SVG width (px); mutually exclusive with px_per_ns
+    font: str | None = None,           # Optional font family list; None auto-reads kitty.conf then falls back to built-in default ("default" forces built-in)
 )
 ```
 
@@ -113,6 +114,7 @@ Event handles & non-mutating `Point` / `TimeRef` anchors (**no hardcoded `"30ns"
   "title": "APB3 Transfer",
   "timescale": "ns",
   "theme": "bamboo",
+  "font": {"families": ["Iosevka", "LXGW WenKai Mono"], "source": "kitty"},
   "end": "180ns",
   "canvas": {
     "width": 959.4,
