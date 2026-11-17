@@ -95,7 +95,7 @@ Diagram(
 | `warn_noop` | `True` | 是否在“信号被赋予了与当前值相同的值”时发出 `WaveWarning`。设为 `False` 时不仅静音告警，`describe()` / `inspect()` 也会自动省略没有实际跳变的 `1→1` 噪声，同时仍保留返回事件 `e.sig` 的点句柄。 |
 | `max_width` | `2400.0` | 默认自动缩放（未传 `width` 时）允许的最大**总画布宽度**（单位 px，含左侧信号名与右边距；传 `None` 可完全放开自动展宽，避免 32/64 位长总线图截断）。 |
 | `width` | `None` | 期望的总画布目标像素宽度（如 `width=900`，与 `px_per_ns` 互斥）。会在扣除左侧标签栏、断轴及右边距后反推缩放比，并仍保留时钟最小周期可读性与总线文字不截断两项硬约束；若硬约束或长图注/标题超出目标宽度，会在 `inspect()` / `canvas.width_drivers` 中指出具体驱动源。 |
-| `font` | `None` | 首选字体（支持逗号分隔多字体名，自动前置在内置跨平台字体回退栈之前；按 `font > WAVEVIEW_FONT > kitty.conf > 内置默认` 解析）。未指定时会自动检测本机 Kitty 配置（`kitty.conf` 中的 `font_family` 与覆盖中文区 `U+4E00-U+9FFF` 的 `symbol_map`），若无 Kitty 配置则回落内置系统字体；传 `"default"` 可强制使用内置默认字体。 |
+| `font` | `None` | 首选字体（支持逗号分隔多字体名，自动前置在内置跨平台字体回退栈之前；按 `font > WAVEVIEW_FONT > kitty.conf > 内置默认` 解析）。未指定时会自动检测本机 Kitty 配置（`kitty.conf` 中的 `font_family` 与覆盖中文区 `U+4E00-U+9FFF` 的 `symbol_map`），若无 Kitty 配置则回落内置系统字体；传 `"default"` 可强制使用内置默认字体。首选字体若是已知等宽字体（如 `Iosevka`/`Sarasa Mono`/`PragmataPro` 等 0.5em 窄字体，或 `JetBrains Mono`/`SF Mono`/`Menlo` 等 0.6em 字体），布局会按该字体的真实字宽测量文字（中文按 1em），徽标、标签栏与总线宽度更紧凑；未知字体沿用内置比例字体估算。 |
 
 ---
 

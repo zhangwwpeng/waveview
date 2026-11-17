@@ -516,12 +516,26 @@ def test_kitty_font_renders_valid_svg_and_inspect_report(tmp_path, monkeypatch):
 
     svg = d.to_svg()
     root = ET.fromstring(svg)
-    families = [el.attrib["font-family"] for el in root.iter() if el.tag.endswith("text")]
-    assert families
+    families = [root.attrib["font-family"]] + [
+        el.attrib["font-family"] for el in root.iter() if el.tag.endswith("text") and "font-family" in el.attrib
+    ]
     expected_prefix = "'Iosevka', 'LXGW WenKai Mono', "
-    assert any(fam == f"{expected_prefix}{DEFAULT_SANS}" for fam in families)
+    assert root.attrib["font-family"] == f"{expected_prefix}{DEFAULT_SANS}"
     assert any(fam == f"{expected_prefix}{DEFAULT_MONO}" for fam in families)
     assert all("LXGW WenKai Mono', 'Menlo'" not in fam for fam in families)
+
+    # Narrow-font metrics: Iosevka is a 0.5em fixed-pitch face, CJK glyphs 1em.
+    assert d._fonts.metrics.advance == 0.5
+    from waveview.layout import compute_layout
+
+    narrow = compute_layout(d)
+    monkeypatch.setenv("WAVEVIEW_KITTY_CONF", "none")
+    d_def = Diagram(title="Kitty 字体测试")
+    clk2 = d_def.clock("clk", period="10ns")
+    req2 = d_def.wire("req", init=0)
+    d_def.posedge(clk2)(req=1)
+    assert req2.name == "req"
+    assert narrow.x0 < compute_layout(d_def).x0
 
     info = d.to_dict()
     assert info["font"] == {"families": ["Iosevka", "LXGW WenKai Mono"], "source": "kitty"}
@@ -531,3 +545,81 @@ def test_kitty_font_renders_valid_svg_and_inspect_report(tmp_path, monkeypatch):
     d_esc = Diagram(title="Escape", font="Maple Mono & <Demo>")
     d_esc.wire("w", init=0)
     ET.fromstring(d_esc.to_svg())
+
+
+def test_font_metrics_table_and_text_width():
+    from waveview.fonts import metrics_for
+    from waveview.layout import text_width
+
+    assert metrics_for(()).advance is None
+    assert metrics_for(("Iosevka",)).advance == 0.5
+    assert metrics_for(("Iosevka Term SS04",)).advance == 0.5
+    assert metrics_for(("Iosevka Term Extended",)).advance == 0.6
+    assert metrics_for(("Iosevka Aile",)).advance is None
+    assert metrics_for(("JetBrainsMono Nerd Font",)).advance == 0.6
+    assert metrics_for(("Some Unknown Sans",)).advance is None
+
+    narrow = metrics_for(("Iosevka", "LXGW WenKai Mono"))
+    assert text_width("ABCD", 10, metrics=narrow) == 20.0
+    assert text_width("ab →…", 10, metrics=narrow) == 25.0
+    assert text_width("握手", 10, metrics=narrow) == 20.0
+    # Default heuristic remains wider than a 0.5em face for ASCII.
+    assert text_width("data[7:0]", 11) > text_width("data[7:0]", 11, metrics=narrow)
+
+
+def test_review_regressions_blank_bus_tco_note_unit_and_overflow():
+    import re
+
+    import pytest
+
+    from waveview import Diagram
+    from waveview.errors import WaveError
+
+    # Blank bus value: no label, no layout warning.
+    d = Diagram(width=900)
+    clk = d.clock("clk", freq="100MHz")
+    b = d.bus("b", init=0)
+    d.posedge(clk, 2)(b="")
+    d.posedge(clk, 2)(b=1)
+    assert d.to_dict()["ok"] is True
+
+    # Notes/points on a clock row snap to the clock edge, not edge + tco.
+    d = Diagram()
+    clk = d.clock("clk", period="10ns", tco="1.5ns")
+    d.wire("valid", init=0)
+    e = d.posedge(clk, 2)(valid=1)
+    d.note(clk, e, "hs")
+    d.arrow((clk, e), e.valid)
+    assert d.annotations[0].time == d.annotations[1].src.time == d.point(clk, e).time
+    assert float(d.annotations[0].time) == pytest.approx(10e-9)
+
+    # Unit suffix clears the right-most tick label.
+    d = Diagram()
+    clk = d.clock("clk", freq="100MHz")
+    d.wire("s", init=0)
+    d.posedge(clk, 11)(s=1)
+    texts = re.findall(r'<text x="([\d.]+)"[^>]*>([^<]+)</text>', d.to_svg())
+    unit_x = next(float(x) for x, t in texts if t == "ns")
+    last_tick_x = max(float(x) for x, t in texts if t.isdigit())
+    assert unit_x >= last_tick_x + text_width_of("120") / 2 + 4 - 0.01
+
+    # Long note badges stay inside the canvas.
+    d = Diagram()
+    clk = d.clock("clk", freq="100MHz")
+    a = d.wire("a", init=0)
+    for i in range(8):
+        d.posedge(clk)(a=(i + 1) % 2)
+    d.note(a, d.now, "这是一个很长很长的中文注释用于说明此处的握手时序关系")
+    svg = d.to_svg()
+    width = float(re.search(r'<svg[^>]* width="([\d.]+)"', svg).group(1))
+    for x, w in re.findall(r'<rect x="([\d.-]+)" y="[^"]+" width="([\d.]+)" height="14', svg):
+        assert float(x) + float(w) <= width - 10
+
+    with pytest.raises(WaveError):
+        Diagram().bus("x", width=True)
+
+
+def text_width_of(s: str) -> float:
+    from waveview.layout import text_width
+
+    return text_width(s, 10, mono=True)

@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import math
 import unicodedata
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from fractions import Fraction
 from typing import TYPE_CHECKING, Any
 
-from .fonts import DEFAULT_MONO, DEFAULT_SANS
+from .fonts import DEFAULT_METRICS, DEFAULT_MONO, DEFAULT_SANS, FontMetrics
 from .model import Arrow, Clock, Gap, Marker, Measure, Note, Region, Row, Signal, Value
 from .units import format_time
 
@@ -44,11 +47,33 @@ _WIDE_SYMBOLS = frozenset("←→↑↓↔⇒⇐…—–")
 Box2D = tuple[float, float, float, float]  # cx, cy, half_w, half_h
 
 
-def text_width(s: str, size: float, mono: bool = False) -> float:
+_METRICS: ContextVar[FontMetrics] = ContextVar("waveview_font_metrics", default=DEFAULT_METRICS)
+
+
+@contextmanager
+def use_metrics(metrics: FontMetrics) -> Iterator[None]:
+    """Measure text with ``metrics`` (the Diagram's resolved font) inside the block."""
+    token = _METRICS.set(metrics)
+    try:
+        yield
+    finally:
+        _METRICS.reset(token)
+
+
+def text_width(s: str, size: float, mono: bool = False, metrics: FontMetrics | None = None) -> float:
+    m = metrics or _METRICS.get()
+    if m.advance is not None:
+        # Known fixed-pitch primary font (sans and mono stacks both start with it):
+        # every non-CJK glyph shares one advance, so narrow fonts like Iosevka get
+        # tight badges / label rails instead of the proportional SF Pro estimate.
+        w = 0.0
+        for ch in s:
+            w += size * (m.cjk if unicodedata.east_asian_width(ch) in ("W", "F") else m.advance)
+        return w
     w = 0.0
     for ch in s:
         if unicodedata.east_asian_width(ch) in ("W", "F"):
-            w += size * 1.04
+            w += size * m.cjk
         elif ch in _WIDE_SYMBOLS:
             w += size * 0.95
         elif mono:
@@ -185,7 +210,7 @@ def _resolve_scale(
             best_need = 0.0
             best_seg: tuple[Fraction, Fraction, Value] | None = None
             for t0, t1, v in r.segments(end):
-                if v in ("x", "z"):
+                if v in ("x", "z") or not r.display(v).strip():
                     continue
                 vis = _max_visible_span(t0, t1, gaps)
                 if vis <= 0:
@@ -413,6 +438,11 @@ class DiagramLayout:
 
 def compute_layout(d: Diagram) -> DiagramLayout:
     """Compute all coordinates, lane packing, and canvas bounds for ``d``."""
+    with use_metrics(d._fonts.metrics):
+        return _compute_layout(d)
+
+
+def _compute_layout(d: Diagram) -> DiagramLayout:
     end = d.end
     gaps = _merge_gaps(d.gaps, end)
     visible_span = end - sum((g.end - g.start for g in gaps), Fraction(0))
@@ -548,7 +578,12 @@ def compute_layout(d: Diagram) -> DiagramLayout:
     note_min_right = 0.0
     widest_note: Note | None = None
     for n in notes:
-        right = x0 + text_width(n.label, 10.5) + 16 + PAD
+        tw = text_width(n.label, 10.5)
+        right = x0 + tw + 16 + PAD
+        if x_end - x0 < tw + 11 + 4:
+            # Badge wider than the wave area: svg can only clamp it on the left, and the
+            # placement search may shift it up to 32px right of its anchor.
+            right = max(right, tm.x(n.time) + 32 + tw / 2 + 5.5 + PAD)
         if right > note_min_right:
             note_min_right = right
             widest_note = n

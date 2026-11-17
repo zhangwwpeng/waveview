@@ -46,6 +46,86 @@ _MAX_INCLUDE_DEPTH = 8
 
 
 @dataclass(frozen=True)
+class FontMetrics:
+    """Advance-width model used by the layout engine to size text.
+
+    ``advance`` is the per-glyph advance (in em) of the primary font when it is a
+    known fixed-pitch family; every non-CJK glyph is then measured at that width
+    (Iosevka / PragmataPro / Sarasa are 0.5em "narrow" fonts, most coding fonts are
+    0.6em).  ``None`` falls back to the built-in proportional heuristic tuned for
+    SF Pro / PingFang.  ``cjk`` is the advance of East Asian wide/fullwidth glyphs.
+    """
+
+    advance: float | None = None
+    cjk: float = 1.04
+    family: str | None = None
+
+
+DEFAULT_METRICS = FontMetrics()
+
+# Normalised (lowercase, alnum-only) family prefix -> fixed advance in em.
+_KNOWN_ADVANCES: dict[str, float] = {
+    # 0.5em narrow monospace families
+    "iosevka": 0.5,
+    "sarasamono": 0.5,
+    "sarasaterm": 0.5,
+    "sarasafixed": 0.5,
+    "pragmatapro": 0.5,
+    "zedmono": 0.5,
+    "inconsolata": 0.5,
+    "ubuntumono": 0.5,
+    "ubuntusansmono": 0.5,
+    "lxgwwenkaimono": 0.5,
+    "mplus1code": 0.5,
+    # common 0.6em coding fonts
+    "sfmono": 0.6,
+    "jetbrainsmono": 0.6,
+    "firacode": 0.6,
+    "firamono": 0.6,
+    "menlo": 0.602,
+    "monaco": 0.6,
+    "sourcecodepro": 0.6,
+    "ibmplexmono": 0.6,
+    "hack": 0.602,
+    "dejavusansmono": 0.602,
+    "robotomono": 0.6,
+    "cascadiacode": 0.586,
+    "cascadiamono": 0.586,
+    "consolas": 0.55,
+    "victormono": 0.6,
+    "maplemono": 0.6,
+    "monaspace": 0.6,
+    "commitmono": 0.6,
+    "geistmono": 0.6,
+    "notosansmono": 0.6,
+    "liberationmono": 0.6,
+    "couriernew": 0.6,
+    "meslolg": 0.602,
+    "lilex": 0.6,
+    "intelonemono": 0.6,
+}
+# Iosevka-derived families ship an ``Extended`` width variant at 0.6em.
+_EXTENDED_BASES = ("iosevka", "sarasa", "zedmono")
+# Quasi-proportional members of otherwise monospace superfamilies.
+_PROPORTIONAL_MARKERS = ("aile", "etoile")
+
+
+def metrics_for(families: Sequence[str]) -> FontMetrics:
+    """Pick text metrics from the first (primary) family of a resolved stack."""
+    if not families:
+        return DEFAULT_METRICS
+    primary = families[0]
+    key = re.sub(r"[^0-9a-z]", "", primary.lower())
+    match = max((p for p in _KNOWN_ADVANCES if key.startswith(p)), key=len, default=None)
+    if match is None or any(m in key for m in _PROPORTIONAL_MARKERS):
+        return DEFAULT_METRICS
+    advance = _KNOWN_ADVANCES[match]
+    if "extended" in key and match.startswith(_EXTENDED_BASES):
+        advance = 0.6
+    return FontMetrics(advance=advance, cjk=1.0, family=primary)
+
+
+@dataclass(frozen=True)
 class FontSpec:
     """Resolved SVG font stacks and provenance for a Diagram."""
 
@@ -53,6 +133,10 @@ class FontSpec:
     mono: str
     families: tuple[str, ...] = ()
     source: Literal["default", "kitty", "env", "argument"] = "default"
+
+    @property
+    def metrics(self) -> FontMetrics:
+        return metrics_for(self.families)
 
 
 def _strip_outer_quotes(text: str) -> str:

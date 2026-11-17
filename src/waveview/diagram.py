@@ -339,7 +339,7 @@ class Diagram:
         pad: bool = True,
     ) -> Signal:
         self._declare(name)
-        if width is not None and (not isinstance(width, int) or width < 1):
+        if width is not None and (isinstance(width, bool) or not isinstance(width, int) or width < 1):
             raise WaveError(f'总线 "{name}"：width 必须是正整数，收到的是 {width!r}')
         if fmt not in ("hex", "dec", "bin"):
             raise WaveError(f'总线 "{name}"：fmt 只能是 "hex"、"dec" 或 "bin"')
@@ -557,7 +557,7 @@ class Diagram:
                 except ValueError as exc:
                     raise WaveError(f'总线 "{sig.name}" 的进制字面量 {value!r} 格式无效') from exc
             else:
-                return value
+                return s
         if isinstance(value, int):
             if value < 0:
                 raise WaveError(f'总线 "{sig.name}" 的整数值不能是负数，收到的是 {value}')
@@ -629,10 +629,20 @@ class Diagram:
             raise WaveError(f'信号或时钟 "{row.name}" 不属于当前图表')
         return row
 
+    def _resolve_on(self, row: Row, ref: TimeRef) -> Fraction:
+        """Resolve ``ref`` for an anchor on ``row``: an Event/Wait of clock ``row`` snaps to its edge (ignoring tco)."""
+        if (
+            isinstance(row, Clock)
+            and getattr(ref, "_edge_clock", None) is row
+            and getattr(ref, "_edge_time", None) is not None
+        ):
+            return ref._edge_time  # type: ignore[union-attr]
+        return self._resolve(ref)
+
     def point(self, row: Row | str, at: TimeRef | None = None) -> Point:
         """Return a non-mutating Point anchor on ``row`` at ``at`` (defaults to ``d.now``)."""
         r = self._row(row)
-        t = (self._now or Fraction(0)) if at is None else self._resolve(at)
+        t = (self._now or Fraction(0)) if at is None else self._resolve_on(r, at)
         if t < 0:
             raise WaveError("point 的时间不能是负数")
         return Point(r, t)
@@ -647,7 +657,7 @@ class Diagram:
         if isinstance(ref, tuple) and len(ref) == 2:
             row_ref, time_ref = ref
             r = self._row(row_ref)
-            t = self._resolve(time_ref)
+            t = self._resolve_on(r, time_ref)
             if t < 0:
                 raise WaveError(f"箭头的{end_name}时间不能是负数")
             return Point(r, t)
@@ -719,7 +729,7 @@ class Diagram:
         note_text = _clean_opt_label(text, "note 的注释文字")
         if note_text is None:
             raise WaveError("note 的注释文字必须是非空字符串")
-        t = self._resolve(text_or_at)
+        t = self._resolve_on(row, text_or_at)
         if t < 0:
             raise WaveError("note 的时间不能是负数")
         self.annotations.append(Note(row, t, note_text))

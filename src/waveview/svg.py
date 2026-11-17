@@ -38,6 +38,7 @@ from .layout import (
     compute_layout,
     fmt,
     text_width,
+    use_metrics,
 )
 from .model import Arrow, Clock, Note, Row, Signal
 from .themes import THEMES
@@ -54,6 +55,7 @@ class Canvas:
         self.sans = sans
         self.mono = mono
         self.parts: list[str] = []
+        self.max_right = 0.0  # right edge of the widest badge actually drawn
 
     def add(self, s: str) -> None:
         self.parts.append(s)
@@ -88,6 +90,7 @@ class Canvas:
         if bg:
             w = text_width(s, size, mono) + pad_x * 2
             left = x - w / 2 if anchor == "middle" else x - pad_x if anchor == "start" else x - w + pad_x
+            self.max_right = max(self.max_right, left + w)
             fill = bg_fill or self.c["badge_bg"]
             stroke_attr = (
                 f' stroke="{bg_stroke}" stroke-width="0.9" stroke-opacity="0.32"' if bg_stroke else ""
@@ -96,12 +99,11 @@ class Canvas:
                 f'<rect x="{fmt(left)}" y="{fmt(y - size * 0.84)}" width="{fmt(w)}" '
                 f'height="{fmt(size * 1.34)}" rx="4" fill="{fill}" fill-opacity="0.92"{stroke_attr}/>'
             )
-        family = self.mono if mono else self.sans
-        extra = f' font-weight="{weight}"' if weight else ""
-        self.add(
-            f'<text x="{fmt(x)}" y="{fmt(y)}" fill="{color}" font-size="{size}" '
-            f'font-family="{family}" text-anchor="{anchor}"{extra}>{escape(s)}</text>'
-        )
+        # The root <svg> carries the sans stack; only mono text overrides it.
+        extra = f' font-family="{self.mono}"' if mono and self.mono != self.sans else ""
+        extra += f' text-anchor="{anchor}"' if anchor != "start" else ""
+        extra += f' font-weight="{weight}"' if weight else ""
+        self.add(f'<text x="{fmt(x)}" y="{fmt(y)}" fill="{color}" font-size="{size}"{extra}>{escape(s)}</text>')
 
 
 def render(d: Diagram) -> str:
@@ -109,6 +111,11 @@ def render(d: Diagram) -> str:
 
 
 def render_with_stats(d: Diagram) -> tuple[str, RenderStats]:
+    with use_metrics(d._fonts.metrics):
+        return _render_with_stats(d)
+
+
+def _render_with_stats(d: Diagram) -> tuple[str, RenderStats]:
     c = THEMES[d.theme]
     is_dark = _is_dark(c)
     lay: DiagramLayout = compute_layout(d)
@@ -204,6 +211,9 @@ def render_with_stats(d: Diagram) -> tuple[str, RenderStats]:
         for m, cx, lane_idx in lay.marker_items
         if m.label
     ]
+    for name, depth, top in lay.headers:
+        hw = text_width(name, 12) / 2
+        marker_labels.append((PAD + depth * INDENT + hw, top + 13, hw, 7.0))
 
     # ---- region labels sit cleanly above the waves ----
     region_labels: list[Box2D] = []
@@ -243,6 +253,7 @@ def render_with_stats(d: Diagram) -> tuple[str, RenderStats]:
             )
 
     # ---- axis ticks ----
+    unit_x = x_end + 8
     if lay.scale > 0 and tm.visible():
         unit = TIME_UNITS[d.timescale]
         step = _nice_step(40 / lay.scale / float(unit)) * float(unit)
@@ -271,8 +282,10 @@ def render_with_stats(d: Diagram) -> tuple[str, RenderStats]:
                     cv.line(x, axis_y, x, axis_y + 4, c["muted"], width=1)
                     label = format_time(t, d.timescale, digits=tick_digits)[: -len(d.timescale)]
                     cv.text(x, axis_y + 16, label, c["muted"], size=10, anchor="middle", mono=True)
+                    # Keep the unit suffix clear of a tick label centred near the right end.
+                    unit_x = max(unit_x, x + text_width(label, 10, mono=True) / 2 + 4)
                 k += 1
-    cv.text(x_end + 8, axis_y + 4, d.timescale, c["muted"], size=10, mono=True)
+    cv.text(unit_x, axis_y + 4, d.timescale, c["muted"], size=10, mono=True)
 
     # ---- markers ----
     marker_xs: list[float] = []
@@ -407,9 +420,13 @@ def render_with_stats(d: Diagram) -> tuple[str, RenderStats]:
         f'<path d="M0,1.6 L10,5 L0,8.4 L2.3,5 z" fill="{c["measure"]}"/></marker>'
         "</defs>"
     )
+    if cv.max_right + PAD > width + 0.05:
+        # Safety net: never let a placed badge spill past the viewBox.
+        width = cv.max_right + PAD
+        stats.width = round(width, 2)
     svg = (
         f'<svg xmlns="http://www.w3.org/2000/svg" width="{fmt(width)}" height="{fmt(height)}" '
-        f'viewBox="0 0 {fmt(width)} {fmt(height)}">' + defs + "".join(cv.parts) + "</svg>\n"
+        f'viewBox="0 0 {fmt(width)} {fmt(height)}" font-family="{cv.sans}">' + defs + "".join(cv.parts) + "</svg>\n"
     )
     return svg, stats
 
@@ -539,6 +556,8 @@ def _draw_bus(
         # Put the value in the widest piece of the segment that no gap covers.
         pieces = [(max(t0, a), min(t1, e)) for a, e in tm.visible() if min(t1, e) > max(t0, a)]
         raw_label = sig.display(v)
+        if not raw_label.strip():
+            continue  # an intentionally blank bus value draws no label
         if not pieces:
             if stats is not None:
                 stats.dropped_labels.append(
